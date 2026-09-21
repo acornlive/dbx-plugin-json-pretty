@@ -1,0 +1,6 @@
+# 构建/开发产物
+dist/
+.dbx-dev/
+.workbuddy
+
+node_modules/

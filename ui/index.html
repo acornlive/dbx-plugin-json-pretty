@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON 格式化工具</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="toolbar" id="jsonToolbar">
+      <button class="btn btn-primary" data-action="format" data-i18n="format">格式化</button>
+      <button class="btn" data-action="compress" data-i18n="compress">压缩</button>
+      <button class="btn" data-action="escape" data-i18n="escape">转义</button>
+      <button class="btn" data-action="unescape" data-i18n="unescape">去转义</button>
+      <button class="btn" data-action="collapse" data-i18n="collapse_all">全部折叠</button>
+      <button class="btn" data-action="expand" data-i18n="expand_all">全部展开</button>
+      <button class="btn" data-action="clear" data-i18n="clear">清空</button>
+      <button class="btn btn-accent" data-action="import" data-i18n="import" data-i18n-title="import_title" title="选择本地 .json 文件导入">导入</button>
+      <button class="btn btn-accent" data-action="save" data-i18n="save" data-i18n-title="save_title" title="导出为 JSON 文件（文件名默认为当前时间）">导出</button>
+    </div>
+
+    <div class="split" id="split">
+      <div class="pane" id="paneLeft">
+        <div class="pane-title">
+          <span data-i18n="raw_data">原始数据（可编辑）</span>
+          <span class="pane-actions">
+            <span class="counter" id="inputCounter" data-i18n="counter">0 字符</span>
+            <button class="mini-btn" data-action="copy-input" data-i18n="copy" data-i18n-title="copy_input_title" title="复制原始数据">复制</button>
+          </span>
+        </div>
+        <textarea id="jsonInput" class="editor" spellcheck="false" data-i18n-ph="placeholder" placeholder='在此粘贴 JSON，或点上方「导入」'></textarea>
+        <input id="fileInput" type="file" accept=".json,.jsonl,.txt,application/json" hidden />
+      </div>
+
+      <div class="resizer" id="resizer" data-i18n-title="resizer_title" title="拖动调整左右宽度"></div>
+
+      <div class="pane" id="paneRight">
+        <div class="pane-title">
+          <span data-i18n="result">结果</span>
+          <span class="pane-actions">
+            <span class="level-label" data-i18n="expand_label">展开</span>
+            <span id="levelButtons" class="level-buttons"></span>
+            <button class="mini-btn" data-action="copy" data-i18n="copy" data-i18n-title="copy_output_title" title="复制结果全部内容">复制</button>
+          </span>
+        </div>
+        <div id="jsonOutput" class="json-view" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右键上下文菜单：仅「复制」 -->
+  <div id="ctxMenu" class="ctx-menu" role="menu" hidden>
+    <button class="ctx-item" data-act="copy-sel" role="menuitem" data-i18n="ctx_copy">复制</button>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

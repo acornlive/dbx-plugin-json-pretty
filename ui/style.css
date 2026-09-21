@@ -1,0 +1,337 @@
+/* ============================================================
+   JSON 格式化工具 - DBX 插件样式
+   主题：使用 DBX 注入文档根的 --color-* 设计变量，并带安全回退色。
+   布局：工具栏 + 左右可拖动双栏，内容区铺满视口。
+   ============================================================ */
+
+:root {
+  --bg: var(--color-background, #f5f6f8);
+  --panel-bg: var(--color-panel, #ffffff);
+  --editor-bg: var(--color-input, #fbfbfd);
+  --border: var(--color-border, #e3e6ec);
+  --text: var(--color-foreground, #2b2f38);
+  --text-soft: var(--color-muted-foreground, #8a90a0);
+  --primary: var(--color-primary, #6d5dfc);
+  --primary-hover: var(--color-primary-hover, #5a4af0);
+  --primary-fg: var(--color-primary-foreground, #ffffff);
+  --code-bg: var(--color-muted, #f4f6fa);
+  --radius: 8px;
+
+  --hl-key: var(--color-json-key, #6d5dfc);
+  --hl-string: var(--color-json-string, #0e9f76);
+  --hl-number: var(--color-json-number, #e0852b);
+  --hl-boolean: var(--color-json-boolean, #c0392b);
+  --hl-null: var(--color-json-null, #7f8c8d);
+  --hl-punct: var(--color-muted-foreground, #8a90a0);
+  --hl-row-hover: var(--color-accent-soft, #f0f4ff);
+
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+html { background: var(--bg); }
+
+body {
+  padding: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+
+/* ---------- 工具栏 ---------- */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+}
+
+.btn {
+  padding: 7px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, transform .05s;
+}
+.btn:hover { background: #1f2330; border-color: #1f2330; color: #ffffff; }
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+.btn-primary:hover { background: #4b4663; border-color: #4b4663; color: #ffffff; }
+.btn-accent { border-color: var(--color-primary-soft, #b9c8ff); background: var(--color-primary-tint, #eef3ff); color: var(--primary-hover); }
+.btn-accent:hover { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+.btn.ok { background: #e8f7ec; border-color: #34a853; color: #1a7f37; }
+.btn.fail { background: #fdecec; border-color: #e5484d; color: #c0392b; }
+
+/* ---------- 分栏（可拖动） ---------- */
+.split {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8px minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+}
+.pane {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+  overflow: hidden;
+  min-width: 0;
+  position: relative;
+}
+.resizer {
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 2;
+}
+.resizer::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+  background: var(--border);
+  border-radius: 2px;
+}
+.resizer:hover::after { background: var(--primary); }
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing .resizer::after { background: var(--primary); }
+
+.pane-title {
+  padding: 9px 14px;
+  font-size: 12px;
+  color: var(--text-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--editor-bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.counter { font-variant-numeric: tabular-nums; }
+.pane-actions { display: inline-flex; align-items: center; gap: 4px; }
+.level-label { color: var(--text-soft); font-size: 11px; }
+.level-buttons { display: inline-flex; align-items: center; gap: 4px; }
+.hint-label { color: var(--text-soft); font-size: 11px; opacity: 0.8; }
+
+/* 动态生成的层级展开按钮（按 JSON 实际层级，可能到 4/5 层以上） */
+.lvl-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-soft);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.lvl-btn:hover { border-color: var(--primary); color: var(--primary); }
+.lvl-btn.active { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
+
+.mini-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-soft);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.mini-btn:hover { border-color: var(--primary); color: var(--primary); }
+.mini-btn.ok { background: #e8f7ec; border-color: #34a853; color: #1a7f37; }
+.mini-btn.fail { background: #fdecec; border-color: #e5484d; color: #c0392b; }
+
+.editor {
+  flex: 1;
+  width: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 14px;
+  font-family: var(--font-mono, "SF Mono", "Cascadia Code", Consolas, "Courier New", monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  /* 与右侧结果区保持同一底色，避免一灰一白 */
+  background: var(--panel-bg);
+  color: var(--text);
+  tab-size: 2;
+}
+
+/* 细浅滚动条：左/右面板通用 */
+.editor, .json-view {
+  scrollbar-width: thin;                 /* Firefox */
+  scrollbar-color: var(--border) transparent;
+}
+.editor::-webkit-scrollbar, .json-view::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.editor::-webkit-scrollbar-track, .json-view::-webkit-scrollbar-track {
+  background: transparent;
+}
+.editor::-webkit-scrollbar-thumb, .json-view::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.editor::-webkit-scrollbar-thumb:hover, .json-view::-webkit-scrollbar-thumb:hover {
+  background: var(--text-soft);
+  background-clip: padding-box;
+}
+
+/* ---------- JSON 视图 ---------- */
+.json-view {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 12px;
+  font-family: var(--font-mono, "SF Mono", "Cascadia Code", Consolas, monospace);
+  font-size: 13px;
+  line-height: 1.65;
+  background: var(--panel-bg);
+  white-space: pre;
+  tab-size: 2;
+}
+.json-view .row { padding: 0 2px; border-radius: 3px; }
+.json-view .row:hover { background: var(--hl-row-hover); }
+.json-view .fold-toggle {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  color: var(--primary);
+  user-select: none;
+}
+.json-view .fold-toggle.clickable { cursor: pointer; }
+.json-view .key { color: var(--hl-key); }
+.json-view .string { color: var(--hl-string); }
+.json-view .number { color: var(--hl-number); }
+.json-view .boolean { color: var(--hl-boolean); }
+.json-view .null { color: var(--hl-null); font-style: italic; }
+.json-view .punct { color: var(--hl-punct); }
+.json-view .preview { color: var(--hl-punct); font-style: italic; }
+.json-view .plaintext { color: var(--text); white-space: pre-wrap; word-break: break-all; }
+.json-view .error { color: #e5484d; white-space: pre-wrap; }
+
+/* 选中时强制 JSON 文本为深色，避免亮高亮色叠半透明选区后看不清（Light 下尤其明显） */
+.json-view ::selection, .json-view .row ::selection {
+  color: var(--text);
+}
+.json-view ::-moz-selection, .json-view .row ::-moz-selection {
+  color: var(--text);
+}
+
+/* ---------- 深色主题：DBX 注入的非语义 --color-* 令牌在深背景下可能无效，
+   统一覆盖为自管深色，保证整工具内容清晰可读 ---------- */
+:root[data-dbx-theme="dark"] {
+  --bg: #16181d;
+  --panel-bg: #1c1f26;
+  --editor-bg: #1c1f26;
+  --border: #2c313c;
+  --text: #e6e8ee;
+  --text-soft: #9aa3b2;
+  --primary: #8b7ff5;
+  --primary-hover: #7a6df0;
+  --primary-fg: #ffffff;
+  --code-bg: #23262f;
+  --hl-key: #8b7ff5;
+  --hl-string: #4fd6ab;
+  --hl-number: #f0a85a;
+  --hl-boolean: #ef7d8b;
+  --hl-null: #8a93a3;
+  --hl-punct: #9aa3b2;
+  --hl-row-hover: #262a33;
+}
+
+/* 深色下的按钮/状态：替换掉浅色主题的浅底硬编码 */
+:root[data-dbx-theme="dark"] .btn-accent {
+  border-color: #4a4470;
+  background: #262338;
+  color: #b9b1ff;
+}
+:root[data-dbx-theme="dark"] .btn.ok,
+:root[data-dbx-theme="dark"] .mini-btn.ok {
+  background: #1d3527;
+  border-color: #34a853;
+  color: #6fd68a;
+}
+:root[data-dbx-theme="dark"] .btn.fail,
+:root[data-dbx-theme="dark"] .mini-btn.fail {
+  background: #3a1f22;
+  border-color: #e5484d;
+  color: #ff8a90;
+}
+:root[data-dbx-theme="dark"] .json-view .error { color: #ff8a90; }
+
+/* ---------- 右键上下文菜单 ---------- */
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16);
+}
+.ctx-menu[hidden] { display: none; }
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.ctx-item:hover { background: var(--color-primary, #6d5dfc); color: var(--color-primary-foreground, #fff); }
+.ctx-item:active { transform: translateY(1px); }
+
+/* 文本选区高亮，深浅主题都清晰 */
+.editor::selection, .json-view::selection { background: color-mix(in srgb, var(--color-primary, #6d5dfc) 22%, transparent); }
+.editor::-moz-selection, .json-view::-moz-selection { background: color-mix(in srgb, var(--color-primary, #6d5dfc) 22%, transparent); }
+
+/* Light 主题下选区略加深（22% 偏浅），提升与高亮文字的对比 */
+:root:not([data-dbx-theme="dark"]) .editor::selection,
+:root:not([data-dbx-theme="dark"]) .json-view::selection {
+  background: color-mix(in srgb, var(--color-primary, #6d5dfc) 26%, #eef0f5);
+}
+:root:not([data-dbx-theme="dark"]) .editor::-moz-selection,
+:root:not([data-dbx-theme="dark"]) .json-view::-moz-selection {
+  background: color-mix(in srgb, var(--color-primary, #6d5dfc) 26%, #eef0f5);
+}
+
+@media (max-width: 820px) {
+  .split { grid-template-columns: minmax(0, 1fr) 8px minmax(0, 1fr); }
+}

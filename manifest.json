@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "chatawesome.cn.json-pretty",
+  "name": "JSON 格式化工具",
+  "version": "0.1.0",
+  "publisher": "workbuddy",
+  "description": "格式化、压缩、折叠、转义、导入、导出 JSON。",
+  "icon": "assets/json-pretty.svg",
+  "engines": {
+    "dbx": ">=0.5.68",
+    "host_api": "1"
+  },
+  "entrypoints": {
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "chatawesome.cn.json-pretty.workbench",
+      "label": "JSON 格式化",
+      "description": "由 JSON 格式化工具提供的沙箱前端工作台。",
+      "icon": "assets/json-pretty.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "JSON 格式化工具",
+      "description": "格式化、压缩、折叠、转义、导入、导出 JSON。",
+      "contributions": {
+        "chatawesome.cn.json-pretty.workbench": {
+          "label": "JSON 格式化",
+          "description": "由 JSON 格式化工具提供的沙箱前端工作台。"
+        }
+      }
+    }
+  }
+}

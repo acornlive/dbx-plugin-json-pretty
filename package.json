@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@dbx-app/plugin-cli": "^0.1.9"
+  }
+  
+}
