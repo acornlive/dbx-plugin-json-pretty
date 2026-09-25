@@ -46,11 +46,15 @@ jobs:
           console.log("✓ manifest.json ≡ backend/main.go  identity:", manifest.id, manifest.version);
           NODE
 
-      - name: Install plugin CLI (global, avoid node_modules pollution)
-        run: sudo npm install -g @dbx-app/plugin-cli@0.1.9
+      - name: Inspect local go.mod
+        run: cat backend/go.mod
 
       - name: Package Linux candidate
-        run: dbx-plugin package . --target linux-x64 --output-dir dist
+        run: npx --yes @dbx-app/plugin-cli@0.1.9 package . --target linux-x64 --output-dir dist
+
+      - name: Inspect CLI-generated go.mod
+        if: always()
+        run: cat dist/.build-go-linux-x64/go.mod 2>/dev/null || echo "go.mod not found"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
