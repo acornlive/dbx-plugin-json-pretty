@@ -1,0 +1,54 @@
+name: Check DBX plugin
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.20"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Check Go formatting
+        run: cd backend && test -z "$(gofmt -l .)"
+
+      - name: Go vet
+        run: cd backend && go vet ./...
+
+      - name: Build Go backend
+        run: cd backend && go build -o /dev/null .
+
+      - name: Verify manifest and backend identity
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          const source = fs.readFileSync("backend/main.go", "utf8");
+          const backendId = source.match(/pluginID\s*=\s*"([^"]+)"/)?.[1];
+          const backendVersion = source.match(/pluginVersion\s*=\s*"([^"]+)"/)?.[1];
+          if (!backendId || !backendVersion) throw new Error("Backend identity constants are missing");
+          if (manifest.id !== backendId) throw new Error(`ID mismatch: manifest=${manifest.id} backend=${backendId}`);
+          if (manifest.version !== backendVersion) throw new Error(`Version mismatch: manifest=${manifest.version} backend=${backendVersion}`);
+          console.log("✓ manifest.json ≡ backend/main.go  identity:", manifest.id, manifest.version);
+          NODE
+
+      - name: Package Linux candidate
+        run: npx --yes @dbx-app/plugin-cli@0.1.9 package . --target linux-x64 --output-dir dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: json-pretty-linux-x64
+          path: dist/
