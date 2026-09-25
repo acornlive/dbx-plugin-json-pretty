@@ -12,7 +12,8 @@
     "host_api": "^1.3"
   },
   "permissions": [
-    "host.clipboard:read"
+    "host.clipboard:read",
+    "host.filesystem"
   ],
   "entrypoints": {
     "ui": {
@@ -20,7 +21,7 @@
       "entry": "ui/index.html"
     },
     "backend": {
-      "executable": "bin/jsonpretty"
+      "executable": "bin/dbx-plugin-json-pretty"
     }
   },
   "contributions": [
