@@ -49,12 +49,30 @@ jobs:
       - name: Inspect local go.mod
         run: cat backend/go.mod
 
-      - name: Package Linux candidate
-        run: npx --yes @dbx-app/plugin-cli@0.1.9 package . --target linux-x64 --output-dir dist
+      - name: Cross-compile Go backend (linux-x64)
+        run: |
+          mkdir -p bin
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/jsonpretty ./backend
 
-      - name: Inspect CLI-generated go.mod
-        if: always()
-        run: cat dist/.build-go-linux-x64/go.mod 2>/dev/null || echo "go.mod not found"
+      - name: Package Linux candidate
+        run: |
+          node -e "
+          const fs = require('fs');
+          const raw = fs.readFileSync('dbx-plugin.toml','utf8');
+          const lines = raw.split(/\r?\n/);
+          let skip = false;
+          const out = lines.filter(line => {
+            if (line.startsWith('[backend]')) { skip = true; return false; }
+            if (skip && (line.startsWith('[') || /^schema_version/.test(line))) skip = false;
+            return !skip;
+          }).join('\n');
+          fs.writeFileSync('dbx-plugin.toml', out + '\n');
+          "
+
+          npx --yes @dbx-app/plugin-cli@0.1.9 package . --target linux-x64 --output-dir dist
+
+          # 恢复原始 toml
+          git checkout dbx-plugin.toml
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
