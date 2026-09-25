@@ -1,0 +1,18 @@
+{
+  "name": "JSON 格式化",
+  "description": "格式化、压缩、折叠、转义、导入、导出 JSON，左侧工作区树可新建文件夹/JSON 文件。",
+  "icon": "assets/json-pretty.svg",
+  "tags": [
+    "developer-tools",
+    "files",
+    "format",
+    "json"
+  ],
+  "permissions": [
+    "host.clipboard:read"
+  ],
+  "source": "https://github.com/acornlive/dbx-plugin-json-pretty",
+  "homepage": "https://github.com/acornlive/dbx-plugin-json-pretty",
+  "license": "MIT",
+  "releaseNotes": "大文件虚拟滚动、大文件自动折叠、宿主剪贴板桥接、工作区侧栏文件树可自动保存导入和黏贴的json"
+}

@@ -10,7 +10,7 @@
   --editor-bg: var(--color-input, #fbfbfd);
   --border: var(--color-border, #e3e6ec);
   --text: var(--color-foreground, #2b2f38);
-  --text-soft: var(--color-muted-foreground, #8a90a0);
+  --text-soft: var(--color-muted-foreground, #646a79);
   --primary: var(--color-primary, #6d5dfc);
   --primary-hover: var(--color-primary-hover, #5a4af0);
   --primary-fg: var(--color-primary-foreground, #ffffff);
@@ -25,10 +25,18 @@
   --hl-punct: var(--color-muted-foreground, #8a90a0);
   --hl-row-hover: var(--color-accent-soft, #f0f4ff);
 
+  /* switch 关闭态的轨道色直接用 --text-soft（也就是原来 hover 才有的那个色）：
+     用 --border 的话 light 下 #e3e6ec、dark 下 #2c313c 都和面板底色太接近，
+     默认状态几乎看不见。--text-soft 在两套主题里都随主题变量走，不用再单独覆盖。 */
+  --switch-off: var(--text-soft);
+
   font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
 }
 
 * { box-sizing: border-box; }
+
+/* .pane 是 flex、.resizer 是 grid 单元，都会盖掉 [hidden] 的 UA display:none */
+[hidden] { display: none !important; }
 
 html, body { height: 100%; margin: 0; }
 
@@ -62,13 +70,13 @@ body {
 }
 
 .btn {
-  padding: 7px 13px;
+  padding: 5px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--panel-bg);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: background .15s, transform .05s;
@@ -121,8 +129,13 @@ body {
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing .resizer::after { background: var(--primary); }
 
+/* 三栏标题栏必须等高，否则三块面板的内容区顶边对不齐，看着像错位。
+   高度写死而不是靠内容撑：左右两栏放的是 mini-btn（约 23px 高），
+   工作区栏放的是 switch（16px 高）—— 内容不一样高，靠 padding 撑必然对不齐。 */
 .pane-title {
-  padding: 9px 14px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0 14px;
   font-size: 12px;
   color: var(--text-soft);
   display: flex;
@@ -206,43 +219,238 @@ body.resizing .resizer::after { background: var(--primary); }
   background-clip: padding-box;
 }
 
-/* ---------- JSON 视图 ---------- */
-.json-view {
-  flex: 1;
-  overflow: auto;
-  padding: 10px 12px;
-  font-family: var(--font-mono, "SF Mono", "Cascadia Code", Consolas, monospace);
-  font-size: 13px;
-  line-height: 1.65;
-  background: var(--panel-bg);
-  white-space: pre;
-  tab-size: 2;
+/* ---------- 左侧工作区文件树 ---------- */
+.tree-pane {
+  flex-direction: column;
+  min-width: 0;
 }
-.json-view .row { padding: 0 2px; border-radius: 3px; }
-.json-view .row:hover { background: var(--hl-row-hover); }
-.json-view .fold-toggle {
-  display: inline-block;
-  width: 14px;
-  text-align: center;
-  color: var(--primary);
+
+/* 工具栏「工作区」按钮：图标表示当前状态（▣ 展开 / ▢ 收起） */
+.ws-toggle-btn { display: inline-flex; align-items: center; gap: 6px; }
+.ws-icon { font-size: 14px; line-height: 1; font-weight: 700; }
+
+/* 「保存」开关：滑动式 switch */
+.ws-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
   user-select: none;
 }
-.json-view .fold-toggle.clickable { cursor: pointer; }
-.json-view .key { color: var(--hl-key); }
-.json-view .string { color: var(--hl-string); }
-.json-view .number { color: var(--hl-number); }
-.json-view .boolean { color: var(--hl-boolean); }
-.json-view .null { color: var(--hl-null); font-style: italic; }
-.json-view .punct { color: var(--hl-punct); }
-.json-view .preview { color: var(--hl-punct); font-style: italic; }
-.json-view .plaintext { color: var(--text); white-space: pre-wrap; word-break: break-all; }
-.json-view .error { color: #e5484d; white-space: pre-wrap; }
+.ws-switch input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.ws-track {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  border: 1px solid var(--switch-off);
+  border-radius: 999px;
+  background: var(--switch-off);
+  transition: background 0.18s, border-color 0.18s;
+}
+.ws-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--panel-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s;
+}
+.ws-switch input:checked + .ws-track {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.ws-switch input:checked + .ws-track .ws-knob { transform: translateX(12px); }
+.ws-switch input:focus-visible + .ws-track { outline: 2px solid var(--primary); outline-offset: 1px; }
+/* hover 只做轻微提亮，不再承担「让开关可见」的职责 */
+.ws-switch:hover .ws-track { filter: brightness(1.12); }
+.tree-list {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 6px 12px;
+  font-size: 13px;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  line-height: 26px;
+  padding-right: 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.tree-row:hover { background: var(--hl-row-hover); }
+.tree-row.active {
+  background: var(--color-primary-tint, #eef3ff);
+  color: var(--primary-hover);
+}
+
+.tree-arrow { width: 14px; flex: none; text-align: center; color: var(--text-soft); font-size: 15px; line-height: 1; }
+.tree-tag { flex: none; color: var(--text-soft); font-size: 12px;   }
+.tree-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  padding: 1px 4px;
+  border: 1px solid var(--primary);
+  border-radius: 3px;
+  background: var(--panel-bg);
+  color: var(--text);
+  outline: none;
+}
+.tree-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-soft);
+  white-space: normal;
+}
+
+.tree-menu {
+  position: fixed;
+  z-index: 120;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.16);
+}
+.tree-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tree-menu-item:hover { background: var(--color-primary, #6d5dfc); color: var(--color-primary-foreground, #fff); }
+
+/* 「移动」的目标文件夹选择面板 */
+.tree-move {
+  max-height: 320px;
+  overflow: auto;
+}
+.tree-move-title {
+  padding: 6px 9px;
+  font-size: 11px;
+  color: var(--text-soft);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+.tree-move-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-move-item:hover { background: var(--color-primary, #6d5dfc); color: var(--color-primary-foreground, #fff); }
+
+/* ---------- JSON 视图（虚拟滚动：DOM 行数恒定） ---------- */
+.json-view {
+  --row-h: 22px;
+  --jv-pad-x: 12px;
+  --jv-pad-y: 10px;
+  position: relative;
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+  font-family: var(--font-mono, "SF Mono", "Cascadia Code", Consolas, monospace);
+  font-size: 13px;
+  line-height: 22px;
+  background: var(--panel-bg);
+  tab-size: 2;
+}
+
+/* 撑出滚动区域的画布：宽高由 JS 精确设置，行溢出被裁掉 */
+.jv-canvas {
+  position: relative;
+  overflow: hidden;
+  min-width: 100%;
+  padding: 0;
+}
+.jv-canvas[hidden], .jv-plain[hidden] { display: none; }
+
+/* 行容器：整体 translateY 到当前窗口起点 */
+.jv-rows {
+  position: absolute;
+  top: var(--jv-pad-y);
+  left: var(--jv-pad-x);
+  will-change: transform;
+}
+
+.jv-row {
+  height: var(--row-h);
+  line-height: var(--row-h);
+  white-space: pre;
+  border-radius: 3px;
+  padding-right: 8px;
+}
+.jv-row:hover { background: var(--hl-row-hover); }
+
+.jv-fold { display: inline-block; width: 14px; text-align: center; color: var(--primary); user-select: none; }
+.jv-fold.clickable { cursor: pointer; }
+.jv-key { color: var(--hl-key); }
+.jv-punct { color: var(--hl-punct); }
+.jv-tail { color: var(--hl-punct); }
+.jv-val.s-string { color: var(--hl-string); }
+.jv-val.s-number { color: var(--hl-number); }
+.jv-val.s-boolean { color: var(--hl-boolean); }
+.jv-val.s-null { color: var(--hl-null); font-style: italic; }
+.jv-val.s-punct { color: var(--hl-punct); }
+.jv-val.s-preview { color: var(--hl-punct); font-style: italic; cursor: pointer; }
+.jv-val.s-more { color: var(--primary); font-style: italic; cursor: pointer; }
+
+/* 纯文本模式：压缩 / 转义 / 错误 */
+.jv-plain {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.jv-plain.is-error { color: #e5484d; }
 
 /* 选中时强制 JSON 文本为深色，避免亮高亮色叠半透明选区后看不清（Light 下尤其明显） */
-.json-view ::selection, .json-view .row ::selection {
+.json-view ::selection, .jv-row ::selection {
   color: var(--text);
 }
-.json-view ::-moz-selection, .json-view .row ::-moz-selection {
+.json-view ::-moz-selection, .jv-row ::-moz-selection {
   color: var(--text);
 }
 
@@ -286,7 +494,7 @@ body.resizing .resizer::after { background: var(--primary); }
   border-color: #e5484d;
   color: #ff8a90;
 }
-:root[data-dbx-theme="dark"] .json-view .error { color: #ff8a90; }
+:root[data-dbx-theme="dark"] .jv-plain.is-error { color: #ff8a90; }
 
 /* ---------- 右键上下文菜单 ---------- */
 .ctx-menu {
@@ -332,6 +540,5 @@ body.resizing .resizer::after { background: var(--primary); }
   background: color-mix(in srgb, var(--color-primary, #6d5dfc) 26%, #eef0f5);
 }
 
-@media (max-width: 820px) {
-  .split { grid-template-columns: minmax(0, 1fr) 8px minmax(0, 1fr); }
-}
+/* 列宽由 app.js 的 applyLayout() 写成内联样式（工作区可收起，列数会变），
+   这里不再用媒体查询固定列数，否则会与内联样式互相打架。 */

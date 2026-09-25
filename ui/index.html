@@ -9,6 +9,11 @@
 <body>
   <div class="app">
     <div class="toolbar" id="jsonToolbar">
+      <!-- 工作区开关：« 表示当前是展开的（点了收起） / » 表示已收起（点了展开） -->
+      <button class="btn btn-primary ws-toggle-btn" id="wsToggleBtn" data-action="ws-toggle" title="收起工作区">
+        <span data-i18n="ws_title">工作区</span>
+        <span class="ws-icon" id="wsStateIcon">》</span>
+      </button>
       <button class="btn btn-primary" data-action="format" data-i18n="format">格式化</button>
       <button class="btn" data-action="compress" data-i18n="compress">压缩</button>
       <button class="btn" data-action="escape" data-i18n="escape">转义</button>
@@ -16,11 +21,25 @@
       <button class="btn" data-action="collapse" data-i18n="collapse_all">全部折叠</button>
       <button class="btn" data-action="expand" data-i18n="expand_all">全部展开</button>
       <button class="btn" data-action="clear" data-i18n="clear">清空</button>
-      <button class="btn btn-accent" data-action="import" data-i18n="import" data-i18n-title="import_title" title="选择本地 .json 文件导入">导入</button>
-      <button class="btn btn-accent" data-action="save" data-i18n="save" data-i18n-title="save_title" title="导出为 JSON 文件（文件名默认为当前时间）">导出</button>
+      <button class="btn" data-action="import" data-i18n="import" data-i18n-title="import_title" title="选择本地 .json 文件导入">导入</button>
+      <button class="btn" data-action="save" data-i18n="save" data-i18n-title="save_title" title="导出为 JSON 文件（文件名默认为当前时间）">导出</button>
     </div>
 
     <div class="split" id="split">
+      <aside class="pane tree-pane" id="treePane">
+        <div class="pane-title" id="treeHead">
+          <span data-i18n="ws_title">工作区</span>
+          <label class="ws-switch" data-i18n-title="ws_save_title" title="开启后：导入或粘贴的 JSON 会自动保存到工作区；关闭则用完即走，不落盘">
+            <input type="checkbox" id="wsSaveToggle" />
+            <span class="ws-track"><span class="ws-knob"></span></span>
+            <span data-i18n="ws_save">保存</span>
+          </label>
+        </div>
+        <div id="treeList" class="tree-list"></div>
+      </aside>
+
+      <div class="resizer" id="resizerTree" data-i18n-title="tree_resizer_title" title="拖动调整工作区宽度"></div>
+
       <div class="pane" id="paneLeft">
         <div class="pane-title">
           <span data-i18n="raw_data">原始数据（可编辑）</span>
@@ -44,17 +63,25 @@
             <button class="mini-btn" data-action="copy" data-i18n="copy" data-i18n-title="copy_output_title" title="复制结果全部内容">复制</button>
           </span>
         </div>
-        <div id="jsonOutput" class="json-view" aria-live="polite"></div>
+        <div id="jsonOutput" class="json-view">
+          <div id="jvCanvas" class="jv-canvas" hidden><div id="jvRows" class="jv-rows"></div></div>
+          <pre id="jvPlain" class="jv-plain" hidden></pre>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- 右键上下文菜单：仅「复制」 -->
+  <!-- 右键上下文菜单 -->
   <div id="ctxMenu" class="ctx-menu" role="menu" hidden>
     <button class="ctx-item" data-act="copy-sel" role="menuitem" data-i18n="ctx_copy">复制</button>
+    <button class="ctx-item" data-act="paste" role="menuitem" data-i18n="ctx_paste">粘贴</button>
   </div>
 
   <script src="i18n.js"></script>
+  <script src="core.js"></script>
+  <script src="model.js"></script>
+  <script src="view.js"></script>
+  <script src="workspace.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

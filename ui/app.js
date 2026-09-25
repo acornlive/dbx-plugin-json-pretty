@@ -1,72 +1,136 @@
 /* ============================================================
    JSON 格式化工具 - DBX 纯前端插件主逻辑
    - 通过 window.dbxPlugin 桥接宿主（官方 Host API 1）
-   - 按 JSON 层级「按需渲染」：折叠的子树不生成 DOM
-   - 左右面板可拖动（不持久化，每次按内置常量 FALLBACK_RATIO 的固定默认）
+   - 右侧结果区为虚拟滚动（见 view.js）：DOM 行数恒定，滚动与 JSON 大小无关
+   - 大文件自动折叠 + 子节点分页（见 model.js），不一次性建全树
    - 不使用原生 alert/confirm/prompt，不使用 CDN
    ============================================================ */
 (function () {
   'use strict';
 
-  var dbx = (typeof window !== 'undefined' && window.dbxPlugin) ? window.dbxPlugin : null;
-
-  // i18n：来自 i18n.js（window.t / window.locale）。回退到 key 本身，避免脚本缺失时报错。
-  var t = (typeof window !== 'undefined' && typeof window.t === 'function') ? window.t : function (k) { return k; };
-  var currentLocale = (typeof window !== 'undefined' && typeof window.locale === 'function') ? window.locale() : 'en';
+  var JP = window.JP;
+  var Model = JP.Model;
+  var View = JP.View;
+  var JPWS = window.JP.Workspace;   // 左侧工作区文件树（见 workspace.js）
+  var t = JP.t;
+  var $ = JP.$;
+  var dbx = JP.dbx;
 
   /* ---------- 常量 ---------- */
-  var INDENT = 18;              // 每层缩进像素
   var MIN_COL = 180;            // 单侧最小宽度
   var FALLBACK_RATIO = 0.42;    // 左栏默认占比
-  var FULL_EXPAND = Number.MAX_SAFE_INTEGER;    // 全展开标记
+  var FULL_EXPAND = Number.MAX_SAFE_INTEGER;
+  var AUTO_LIMIT = 400000;      // 超过该字符数暂停自动格式化，改由点「格式化」触发
+  var PLAIN_LIMIT = 200000;     // 纯文本模式显示上限（复制仍为完整内容）
+  var TARGET_ROWS = 30000;      // 首次渲染的目标行数
+  var HARD_ROWS = 200000;       // 「全部展开」的行数上限
+  var MAX_LEVEL_BUTTONS = 10;
 
   /* ---------- 状态 ---------- */
   var state = {
-    root: null,        // 当前 JSON 层级树根节点
+    root: null,        // 当前 JSON 层级树根节点（子节点懒构建）
     outputText: '',    // 完整格式化文本（用于复制，不随折叠变化）
-    depth: 0,          // JSON 最大层级
-    keys: 0,           // 键总数
-    items: 0,          // 数组元素总数
-    defaultExpandLevel: FULL_EXPAND  // 默认全展开
+    stats: null,       // { depth, keys, items, nodes, byDepth, truncated }
+    autoOff: false     // 是否已因内容过大暂停自动格式化
   };
 
   /* ---------- 元素引用 ---------- */
   var jsonInput, jsonOutput, inputCounter, splitEl, resizerEl, levelButtonsEl, ctxMenu, fileInput;
+  var jvCanvas, jvRows, jvPlain;
+  var treePane, treeList, resizerTree;
+  var wsToggleBtn, wsStateIcon, wsSaveToggle;
+  var timer = null;
+  var saveTimer = null;
+  var ctxTarget = null;
+  var dirty = false;        // 编辑区自上次载入/保存后是否被改过
+  var saveWarned = false;   // 内容超限时只提示一次，避免每次输入都弹
+  // 注意：这里不能用 FALLBACK_RATIO 初始化 —— 常量在下面用 var 声明，
+  // 提升到顶部时值还是 undefined，初始化会拿到 undefined。故写字面量。
+  var _ratio = 0.42;
+  var _treeW = 220;
+  var currentLocale = (typeof window.locale === 'function') ? window.locale() : 'en';
 
-  function $(id) { return document.getElementById(id); }
-
-  /* ---------- 启动 ---------- */
+  /* ============================================================
+     启动
+     ============================================================ */
   function boot() {
+    cacheEls();
     applyI18n();
+    View.init({ host: jsonOutput, canvas: jvCanvas, rows: jvRows, plain: jvPlain });
+    View.onToggle = onToggle;
+    View.onMore = onMore;
     bindUI();
     initSplitter();
     bindTheme();
     bindLocale();
-    // 左侧默认空，等待用户粘贴 / 导入 / 输入
+    updateCounter();
+    // 工作区（左侧文件树）：就绪后自动载入上次打开的文件
+    JPWS.init({
+      list: treeList,
+      pane: treePane,
+      onOpen: onWorkspaceOpen,
+      onLayout: syncLayoutFromPrefs,
+      onFlush: flushSave
+    });
+  }
+
+  // 工作区把某个文件的内容交给编辑区
+  function onWorkspaceOpen(node, content) {
+    dirty = false;
+    saveWarned = false;
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    jsonInput.value = content || '';
+    updateCounter();
+    if (jsonInput.value.trim()) doFormat(false, false);
+    else clearAll();
+  }
+
+  function cacheEls() {
+    jsonInput = $('jsonInput');
+    jsonOutput = $('jsonOutput');
+    inputCounter = $('inputCounter');
+    splitEl = $('split');
+    resizerEl = $('resizer');
+    levelButtonsEl = $('levelButtons');
+    ctxMenu = $('ctxMenu');
+    fileInput = $('fileInput');
+    jvCanvas = $('jvCanvas');
+    jvRows = $('jvRows');
+    jvPlain = $('jvPlain');
+    treePane = $('treePane');
+    treeList = $('treeList');
+    resizerTree = $('resizerTree');
+    wsToggleBtn = $('wsToggleBtn');
+    wsStateIcon = $('wsStateIcon');
+    wsSaveToggle = $('wsSaveToggle');
+  }
+
+  if (dbx && dbx.ready && typeof dbx.ready.then === 'function') {
+    dbx.ready.then(boot).catch(boot);
+  } else if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
   }
 
   /* ============================================================
-     国际化：按语言渲染静态文本；随 DBX 语言切换实时更新
+     国际化
      ============================================================ */
   function applyI18n() {
     currentLocale = (typeof window.locale === 'function') ? window.locale() : currentLocale;
     document.documentElement.setAttribute('lang', currentLocale);
 
-    // 文本节点
     document.querySelectorAll('[data-i18n]').forEach(function (el) {
       el.textContent = t(el.getAttribute('data-i18n'));
     });
-    // 属性（title）
     document.querySelectorAll('[data-i18n-title]').forEach(function (el) {
       el.setAttribute('title', t(el.getAttribute('data-i18n-title')));
     });
-    // 属性（placeholder）
     document.querySelectorAll('[data-i18n-ph]').forEach(function (el) {
       el.setAttribute('placeholder', t(el.getAttribute('data-i18n-ph')));
     });
   }
 
-  // 语言切换：宿主通过 dbx-plugin-env / onEvent 广播 locale
   function bindLocale() {
     try {
       if (dbx && typeof dbx.onEvent === 'function') {
@@ -88,113 +152,113 @@
                (window.dbxPlugin && window.dbxPlugin.locale);
     if (!next || next === currentLocale) return;
     applyI18n();
-    // 动态文案同步刷新
     updateCounter();
     renderLevelButtons();
-    if (state.root) renderTree();
-  }
-
-  if (dbx && dbx.ready && typeof dbx.ready.then === 'function') {
-    dbx.ready.then(boot).catch(boot);
-  } else if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
+    View.refresh();
   }
 
   /* ============================================================
      事件绑定
      ============================================================ */
   function bindUI() {
-    jsonInput = $('jsonInput');
-    jsonOutput = $('jsonOutput');
-    inputCounter = $('inputCounter');
-    splitEl = $('split');
-    resizerEl = $('resizer');
-    levelButtonsEl = $('levelButtons');
-    ctxMenu = $('ctxMenu');
-    fileInput = $('fileInput');
-
-    // 导入按钮：「选择本地文件」在隔离 iframe 中仍是标准且可靠的入口
-    // （拖拽依赖宿主原生通道，部分宿主下不生效，故两者并存）
     if (fileInput) {
       fileInput.addEventListener('change', function () {
         var f = fileInput.files && fileInput.files[0];
         if (!f) return;
         readFileInto(f);
-        fileInput.value = ''; // 允许重复选择同一文件
+        fileInput.value = '';
       });
     }
 
     jsonInput.addEventListener('input', function () {
+      dirty = true;
       updateCounter();
       scheduleAuto();
+      scheduleSave();
     });
 
-    // 统一事件委托：工具栏 / 层级按钮 / 结果区折叠箭头
+    // 统一事件委托：工具栏 / 层级按钮
     document.addEventListener('click', function (e) {
-      var lvlBtn = e.target.closest('.lvl-btn');
+      var lvlBtn = e.target.closest && e.target.closest('.lvl-btn');
       if (lvlBtn) { onLevelClick(parseInt(lvlBtn.dataset.level, 10)); return; }
 
-      var btn = e.target.closest('button[data-action]');
+      var btn = e.target.closest && e.target.closest('button[data-action]');
       if (!btn) return;
-      var action = btn.dataset.action;
-      if (ACTIONS[action]) ACTIONS[action]();
+      if (ACTIONS[btn.dataset.action]) ACTIONS[btn.dataset.action]();
     });
 
-    // 折叠/展开：结果区内的折叠箭头
-    jsonOutput.addEventListener('click', function (e) {
-      var toggle = e.target.closest('.fold-toggle.clickable');
-      if (!toggle) return;
-      ensureFormatted();
-      var node = toggle.__node;
-      if (node) { node.expanded = !node.expanded; renderTree(); }
-    });
-
-    // 双击复制：优先复制选中的文本；无选中则复制双击所在块的 JSON 值
+    // 双击复制：优先复制选中的文本；无选中则复制双击所在行的 JSON 值
     jsonOutput.addEventListener('dblclick', function (e) {
-      var sel = (window.getSelection && window.getSelection());
+      var sel = window.getSelection && window.getSelection();
       var text = (sel && !sel.isCollapsed) ? sel.toString() : '';
       if (!text) {
-      var row = e.target.closest('.row');
-      var node = row && row.__node;
-      if (!node) { notify(t('sel_or_dbl')); return; }
-      text = serializeNode(node);
-    }
-    if (!text) return;
-    copyText(text).then(function () { notify(t('copied_sel')); })
-                   .catch(function () { notify(t('copy_fail_manual')); });
+        var rowEl = e.target.closest ? e.target.closest('.jv-row') : null;
+        var entry = rowEl ? View.entryAt(rowEl.__i) : null;
+        if (!entry) { JP.notify(t('sel_or_dbl')); return; }
+        text = Model.serialize(entry.node);
+      }
+      if (!text) return;
+      JP.copyText(text)
+        .then(function () { JP.notify(t('copied_sel')); })
+        .catch(function () { JP.notify(t('copy_fail_manual')); });
     });
 
-    updateCounter();
+    // 「保存」开关：默认关闭（用完即走）。开启后导入 / 粘贴的内容都会落盘。
+    if (wsSaveToggle) {
+      wsSaveToggle.addEventListener('change', function () {
+        JPWS.setSaveEnabled(wsSaveToggle.checked);
+        // 刚开启：把编辑区里已有的内容也存下来，让开关立刻生效而不是等下次输入
+        if (wsSaveToggle.checked) { dirty = true; scheduleSave(); }
+      });
+    }
 
     bindContextMenu();
+
+    // 关页面前把最后一次编辑写回工作区
+    window.addEventListener('pagehide', flushSave);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') flushSave();
+    });
   }
 
   /* ============================================================
-     左侧导入 .json 文件解析（「导入」按钮，纯前端 iframe 可靠入口）
+     导入文件
      ============================================================ */
-
   function loadFromFile(name, content) {
-    // 去掉可能存在的 UTF-8 BOM
     content = content.replace(/^\uFEFF/, '');
+
+    // 开了「保存」：导入 = 在工作区当前目录下新建一个文件并打开，之后编辑自动存回去
+    if (JPWS.available() && JPWS.saveEnabled()) {
+      var base = name.replace(/\.[^.]+$/, '') || name;
+      JPWS.importFile(base + '.json', content, JPWS.currentFolder()).then(function (node) {
+        if (!node) return;
+        var st = state.stats || { depth: 0, keys: 0, items: 0 };
+        JP.notify(t('loaded', node.name, st.depth, JP.fmtNum(st.keys), JP.fmtNum(st.items)));
+      });
+      return;
+    }
+
+    // 无侧车（不在 DBX 工作台 / 侧车没起来）：退回原行为，只填进编辑区
     jsonInput.value = content;
     updateCounter();
+    var data;
     try {
-      var data = JSON.parse(content);
-      state.outputText = JSON.stringify(data, null, 2);
-      syncInputPretty(state.outputText);   // 左侧同步为格式化后的内容
-      buildState(data);
-      defaultExpand();
-      renderTree();
-      notify(t('loaded', name, state.depth, state.keys, state.items));
+      data = JSON.parse(content);
     } catch (e) {
-      renderJsonError(e.message);
-      notify(t('loaded_err', name, e.message));
+      state.root = null;
+      state.stats = null;
+      state.outputText = '';
+      View.setPlain(t('json_err', e.message), true);
+      JP.notify(t('loaded_err', name, e.message));
+      return;
     }
+    doFormat(false, true, data);
+    JP.notify(t('loaded', name,
+      state.stats ? state.stats.depth : 0,
+      state.stats ? JP.fmtNum(state.stats.keys) : 0,
+      state.stats ? JP.fmtNum(state.stats.items) : 0));
   }
 
-  // 读取 File 对象并加载（供「导入」按钮与拖拽共用）
   function readFileInto(file) {
     if (!file) return;
     var reader = new FileReader();
@@ -202,26 +266,18 @@
       var content = String(reader.result == null ? '' : reader.result);
       loadFromFile(file.name, content);
     };
-    reader.onerror = function () { notify(t('file_read_fail', (reader.error && reader.error.message) || 'unknown')); };
+    reader.onerror = function () {
+      JP.notify(t('file_read_fail', (reader.error && reader.error.message) || 'unknown'));
+    };
     reader.readAsText(file);
   }
 
-  function renderJsonError(msg) {
-    state.root = null;
-    state.outputText = '';
-    jsonOutput.innerHTML = '<div class="row"><span class="error">' + escapeHtml(t('json_err', msg)) + '</span></div>';
-  }
-
   /* ============================================================
-     右键上下文菜单：复制所选 / 复制全部 / 全选
-     —— 替代原工具栏「复制结果」。内容区本身可选中（白底/黑底均可）。
+     右键上下文菜单
      ============================================================ */
-  var ctxTarget = null; // 'input' | 'output'
-
   function bindContextMenu() {
     if (!ctxMenu) return;
 
-    // 在输入区 / 结果区上右键弹出
     [jsonInput, jsonOutput].forEach(function (el) {
       el.addEventListener('contextmenu', function (e) {
         e.preventDefault();
@@ -230,7 +286,6 @@
       });
     });
 
-    // 点击菜单项 / 点击别处 / 滚动 关闭
     ctxMenu.addEventListener('click', function (e) {
       var item = e.target.closest('.ctx-item');
       if (!item) return;
@@ -240,12 +295,13 @@
     document.addEventListener('click', function () { hideCtxMenu(); });
     window.addEventListener('scroll', function () { hideCtxMenu(); }, true);
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') hideCtxMenu(); });
-
-    // 关闭工具栏下拉式「复制结果」残留后，这里也兜底：没有选中时「复制所选」改为复制全部
   }
 
   function showCtxMenu(x, y) {
     ctxMenu.hidden = false;
+    // 粘贴只在左侧编辑区（textarea）可用，右侧查看区不提供
+    var pasteBtn = ctxMenu.querySelector('[data-act="paste"]');
+    if (pasteBtn) pasteBtn.hidden = (ctxTarget !== 'input');
     var w = ctxMenu.offsetWidth || 150;
     var h = ctxMenu.offsetHeight || 120;
     var vw = window.innerWidth, vh = window.innerHeight;
@@ -258,8 +314,8 @@
   function hideCtxMenu() { if (ctxMenu) ctxMenu.hidden = true; }
 
   function handleCtx(act) {
+    if (act === 'paste') { doPaste(); return; }
     if (act !== 'copy-sel') return;
-    // 右键「复制」：有选区复制所选，否则复制全部
     var sel;
     if (ctxTarget === 'input') {
       sel = jsonInput.value.substring(jsonInput.selectionStart, jsonInput.selectionEnd);
@@ -267,34 +323,69 @@
       sel = window.getSelection().toString();
     }
     if (sel && sel.trim()) {
-      copyText(sel)
-        .then(function () { notify(t('copied_sel_ok')); })
-        .catch(function () { notify(t('copy_fail')); });
+      JP.copyText(sel)
+        .then(function () { JP.notify(t('copied_sel_ok')); })
+        .catch(function () { JP.notify(t('copy_fail')); });
     } else {
       copyAll();
     }
   }
 
-  // 复制全部（右侧「复制」按钮 / 右键无选区时降级）
   function copyAll() {
     var text = (ctxTarget === 'input') ? jsonInput.value : (state.outputText || jsonOutput.textContent);
-    if (!text) { notify(t('no_copy')); return; }
-    copyText(text)
-      .then(function () { notify(t('copied_all')); })
-      .catch(function () { notify(t('copy_fail_manual')); });
+    if (!text) { JP.notify(t('no_copy')); return; }
+    JP.copyText(text)
+      .then(function () { JP.notify(t('copied_all')); })
+      .catch(function () { JP.notify(t('copy_fail_manual')); });
   }
 
-  /* ---------- 复制所选/全部：通过右键菜单触发 ---------- */
+  function doPaste() {
+    var dbx = JP.dbx;
+    // 宿主读：需要 capabilities.clipboardRead（host.clipboard:read 权限）
+    if (dbx && (dbx.capabilities || {}).clipboardRead && dbx.clipboard && typeof dbx.clipboard.readText === 'function') {
+      dbx.clipboard.readText().then(function (text) {
+        if (text) insertAtCursor(text);
+      }).catch(function () {
+        // 被拒绝（缺权限 / Web 宿主无原生剪贴板）→ 回落到键盘粘贴
+        pasteFallback();
+      });
+      return;
+    }
+    pasteFallback();
+  }
+
+  function pasteFallback() {
+    // 浏览器原生 clipboard（沙箱内通常不可用，仅兜底）
+    if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+      navigator.clipboard.readText().then(function (text) {
+        if (text) insertAtCursor(text);
+      }).catch(function () {});
+      return;
+    }
+    // 键盘粘贴路径
+    jsonInput.focus();
+    try { document.execCommand('paste'); } catch (e) {}
+  }
+
+  function insertAtCursor(text) {
+    var start = jsonInput.selectionStart;
+    var end = jsonInput.selectionEnd;
+    var before = jsonInput.value.substring(0, start);
+    var after = jsonInput.value.substring(end);
+    jsonInput.value = before + text + after;
+    var newPos = start + text.length;
+    jsonInput.setSelectionRange(newPos, newPos);
+    dirty = true;
+    scheduleRender();
+    jsonInput.focus();
+  }
 
   /* ============================================================
-     左右可拖动分栏（固定默认：左栏占比 0.42，不持久化）
+     左右可拖动分栏
      ============================================================ */
   function initSplitter() {
-    // 固定默认值（内联常量，不再依赖单独配置文件）
-    var baseRatio = FALLBACK_RATIO;          // 0.42
-    state.defaultExpandLevel = FULL_EXPAND;  // 首次格式化默认全部展开
-
-    applyRatio(baseRatio);
+    applyLayout();
+    bindTreeResizer();
 
     var dragging = false;
 
@@ -302,8 +393,10 @@
       if (!dragging) return;
       var rect = splitEl.getBoundingClientRect();
       var x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-      var ratio = x / rect.width;
-      applyRatio(clamp(ratio, MIN_COL / rect.width, 1 - MIN_COL / rect.width));
+      var left = JPWS.collapsed() ? 0 : (_treeW + 6);
+      var w = Math.max(1, rect.width - left);
+      _ratio = JP.clamp((x - left) / w, MIN_COL / w, 1 - MIN_COL / w);
+      applyLayout();
       e.preventDefault();
     }
 
@@ -315,6 +408,7 @@
       window.removeEventListener('mouseup', onUp);
       window.removeEventListener('touchmove', onMove);
       window.removeEventListener('touchend', onUp);
+      JPWS.setSplitRatio(_ratio);
     }
 
     function onDown(e) {
@@ -331,19 +425,90 @@
     resizerEl.addEventListener('touchstart', onDown, { passive: false });
   }
 
-  var _ratio = FALLBACK_RATIO;
+  // 工作区宽度拖柄
+  function bindTreeResizer() {
+    var dragging = false;
 
-  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+    function onMove(e) {
+      if (!dragging) return;
+      var rect = splitEl.getBoundingClientRect();
+      var x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      _treeW = JP.clamp(x, 160, 560);
+      applyLayout();
+      e.preventDefault();
+    }
 
-  function applyRatio(ratio) {
-    _ratio = clamp(ratio || FALLBACK_RATIO, 0.1, 0.9);
-    splitEl.style.gridTemplateColumns =
-      'minmax(0, ' + (_ratio * 100).toFixed(3) + 'fr) 8px minmax(0, ' + ((1 - _ratio) * 100).toFixed(3) + 'fr)';
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('resizing');
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onUp);
+      JPWS.setTreeWidth(_treeW);
+    }
+
+    function onDown(e) {
+      dragging = true;
+      document.body.classList.add('resizing');
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove, { passive: false });
+      window.addEventListener('touchend', onUp);
+      e.preventDefault();
+    }
+
+    resizerTree.addEventListener('mousedown', onDown);
+    resizerTree.addEventListener('touchstart', onDown, { passive: false });
   }
 
-  /* ---------- 主题适配（官方：data-dbx-theme + dbx-plugin-env + --color-* tokens） ---------- */
+  // 三栏：工作区 | 拖柄 | 原文 || 拖柄 || 结果
+  // 收起时工作区整块隐藏（不留窄栏），右侧拿到全部宽度。
+  function applyLayout() {
+    var r = JP.clamp(_ratio, 0.1, 0.9);
+    var main = 'minmax(0, ' + (r * 100).toFixed(3) + 'fr) 8px minmax(0, ' + ((1 - r) * 100).toFixed(3) + 'fr)';
+    var collapsed = JPWS.collapsed();
+
+    treePane.hidden = collapsed;
+    resizerTree.hidden = collapsed;
+
+    // 注意：display:none 的 grid 子项不参与排布 —— 收起时列数必须真的少两列，
+    // 否则剩下的 3 个可见项会依次占前 3 列，左右两栏被挤成 1fr + 8px。
+    splitEl.style.gridTemplateColumns = collapsed
+      ? main
+      : (_treeW + 'px 6px ' + main);
+
+    syncWsToggle();
+    View.refresh();
+  }
+
+  // 工具栏「工作区」按钮：« = 当前展开（点了收起） / » = 当前收起（点了展开）
+  var _lastWsIconState = null;
+  function syncWsToggle() {
+    var collapsed = JPWS.collapsed();
+    if (collapsed === _lastWsIconState) return;
+    _lastWsIconState = collapsed;
+    if (wsToggleBtn) {
+      wsToggleBtn.classList.toggle('is-collapsed', collapsed);
+      wsToggleBtn.title = collapsed ? t('ws_expand_title') : t('ws_collapse_title');
+    }
+    if (wsStateIcon) wsStateIcon.textContent = collapsed ? '》' : '《';
+  }
+
+  // 工作区就绪 / 收起状态变化后，用后端保存的偏好重算布局
+  function syncLayoutFromPrefs() {
+    var r = JPWS.splitRatio();
+    _ratio = (typeof r === 'number') ? JP.clamp(r, 0.1, 0.9) : FALLBACK_RATIO;
+    _treeW = JPWS.treeWidth();
+    if (wsSaveToggle) wsSaveToggle.checked = JPWS.saveEnabled();
+    applyLayout();
+  }
+
+  /* ============================================================
+     主题适配
+     ============================================================ */
   function bindTheme() {
-    // 先按官方用 theme 初始化
     try {
       if (dbx && dbx.theme && dbx.theme.appearance) {
         document.documentElement.setAttribute('data-dbx-theme', dbx.theme.appearance);
@@ -381,216 +546,139 @@
   }
 
   /* ============================================================
-     工具
+     格式化 / 渲染
      ============================================================ */
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  function parseInput() {
+    var raw = jsonInput.value.trim();
+    if (!raw) throw new Error(t('input_empty'));
+    return JSON.parse(raw);
   }
 
-  function updateCounter() {
-    if (inputCounter) inputCounter.textContent = jsonInput.value.length + t('chars');
-  }
+  /**
+   * @param {boolean} manual   用户主动触发（点按钮）：成功/失败都通知
+   * @param {boolean} announce 是否播报「已自动折叠」提示
+   * @param {*}       data     已解析好的数据（导入文件时复用，避免二次 parse）
+   */
+  function doFormat(manual, announce, data) {
+    var raw = jsonInput.value.trim();
+    if (!raw) { clearAll(); return; }
 
-  function copyText(text) {
-    if (!text) return Promise.reject(new Error('empty'));
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      try {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.top = '-9999px';
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        var ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        ok ? resolve() : reject(new Error('copy failed'));
-      } catch (e) { reject(e); }
-    });
-  }
-
-  function flashBtn(btn, ok) {
-    var old = btn.textContent;
-    btn.textContent = ok ? t('copied_flash') : t('copy_fail');
-    btn.classList.add(ok ? 'ok' : 'fail');
-    setTimeout(function () {
-      btn.textContent = old;
-      btn.classList.remove('ok', 'fail');
-    }, 1200);
-  }
-
-  // 反馈统一走宿主通知；宿主不支持时静默（不再有工具栏状态栏）
-  function notify(msg) {
-    if (!msg) return;
-    if (dbx && typeof dbx.notify === 'function') {
-      try {
-        var r = dbx.notify(msg);
-        if (r && typeof r.then === 'function') r.catch(function () {});
-        return;
-      } catch (e) { /* 宿主通知失败，忽略 */ }
-    }
-  }
-
-  /* ============================================================
-     构建层级树 & 层级统计
-     ============================================================ */
-  function buildNode(value, key) {
-    if (Array.isArray(value)) {
-      return {
-        kind: 'array', key: key, expanded: true, size: value.length, raw: value,
-        children: value.map(function (v, i) { return buildNode(v, null); })
-      };
-    }
-    if (value && typeof value === 'object') {
-      var ks = Object.keys(value);
-      return {
-        kind: 'object', key: key, expanded: true, size: ks.length, raw: value,
-        children: ks.map(function (k) { return buildNode(value[k], k); })
-      };
-    }
-    return {
-      kind: value === null ? 'null' : typeof value,
-      key: key, value: value
-    };
-  }
-
-  function measure(node, depth, acc) {
-    if (acc.depth < depth) acc.depth = depth;
-    if (node.kind === 'object') { acc.keys += node.size; }
-    if (node.kind === 'array') { acc.items += node.size; }
-    if (node.children) {
-      node.children.forEach(function (c) { measure(c, depth + 1, acc); });
-    }
-  }
-
-  function setExpandedToDepth(node, depth, maxLevel) {
-    if (!node.children) return;
-    node.expanded = depth < maxLevel;
-    node.children.forEach(function (c) { setExpandedToDepth(c, depth + 1, maxLevel); });
-  }
-
-  /* ============================================================
-     按需渲染：仅展开的子树生成 DOM
-     ============================================================ */
-  function renderTree() {
-    var root = state.root;
-    jsonOutput.innerHTML = '';
-    if (!root) return;
-    var frag = document.createDocumentFragment();
-    emitNode(root, 0, frag, true);
-    jsonOutput.appendChild(frag);
-  }
-
-  function makeRow(depth) {
-    var row = document.createElement('div');
-    row.className = 'row';
-    row.style.paddingLeft = (depth * INDENT) + 'px';
-    return row;
-  }
-
-  function makeToggle(node) {
-    var t = document.createElement('span');
-    t.className = 'fold-toggle clickable';
-    t.textContent = node.expanded ? '▾' : '▸';
-    t.__node = node;
-    return t;
-  }
-
-  function keyPrefix(node, isRoot) {
-    if (node.key === null || typeof node.key === 'undefined') return '';
-    return '<span class="key">' + escapeHtml(JSON.stringify(node.key)) + '</span><span class="punct">: </span>';
-  }
-
-  function leafHtml(node) {
-    var v = node.value;
-    if (node.kind === 'string') return '<span class="string">' + escapeHtml(JSON.stringify(v)) + '</span>';
-    if (node.kind === 'number') return '<span class="number">' + escapeHtml(String(v)) + '</span>';
-    if (node.kind === 'boolean') return '<span class="boolean">' + String(v) + '</span>';
-    if (node.kind === 'null') return '<span class="null">null</span>';
-    return escapeHtml(String(v));
-  }
-
-  function emitNode(node, depth, frag, isRoot) {
-    if (!node.children) {
-      var lr = makeRow(depth);
-      lr.__node = node;
-      var lt = document.createElement('span');
-      lt.className = 'fold-toggle';
-      lt.textContent = ' ';
-      var lc = document.createElement('span');
-      lc.innerHTML = keyPrefix(node, isRoot) + leafHtml(node);
-      lr.appendChild(lt);
-      lr.appendChild(lc);
-      frag.appendChild(lr);
-      return;
-    }
-
-    var open = node.kind === 'object' ? '{' : '[';
-    var close = node.kind === 'object' ? '}' : ']';
-    var row = makeRow(depth);
-    row.__node = node;
-    row.appendChild(makeToggle(node));
-    var content = document.createElement('span');
-
-    if (node.expanded) {
-      content.innerHTML = keyPrefix(node, isRoot) + '<span class="punct">' + open + '</span>';
-      row.appendChild(content);
-      frag.appendChild(row);
-
-      // 空容器直接同行收口
-      if (node.size === 0) {
-        var er = makeRow(depth);
-        er.__node = node;
-        var et = document.createElement('span');
-        et.className = 'fold-toggle';
-        et.textContent = ' ';
-        var ec = document.createElement('span');
-        ec.innerHTML = '<span class="punct">' + close + '</span>';
-        er.appendChild(et);
-        er.appendChild(ec);
-        frag.appendChild(er);
+    var d = data;
+    if (d === undefined) {
+      try { d = parseInput(); }
+      catch (e) {
+        state.root = null;
+        state.stats = null;
+        state.outputText = '';
+        View.setPlain(t('json_err', e.message), true);
+        if (manual) JP.notify(t('json_err', e.message));
         return;
       }
+    }
 
-      node.children.forEach(function (c) { emitNode(c, depth + 1, frag, false); });
+    state.outputText = JSON.stringify(d, null, 2);
+    state.stats = Model.collectStats(d);
+    state.root = Model.createNode(d, null);
+    renderLevelButtons();
 
-      var cr = makeRow(depth);
-      cr.__node = node;
-      var ct = document.createElement('span');
-      ct.className = 'fold-toggle';
-      ct.textContent = ' ';
-      var cc = document.createElement('span');
-      cc.innerHTML = '<span class="punct">' + close + '</span>';
-      cr.appendChild(ct);
-      cr.appendChild(cc);
-      frag.appendChild(cr);
-    } else {
-      var unit = node.kind === 'array' ? t('unit_items') : t('unit_keys');
-      content.innerHTML = keyPrefix(node, isRoot) +
-        '<span class="punct">' + open + '</span>' +
-        '<span class="preview"> … ' + node.size + unit + ' </span>' +
-        '<span class="punct">' + close + '</span>';
-      row.appendChild(content);
-      frag.appendChild(row);
+    var lv = levelForRows(state.stats, TARGET_ROWS);
+    applyLevel(lv, true);
+
+    if (manual) {
+      syncInputPretty(state.outputText);
+      JP.notify(t('formatted'));
+    }
+    if (announce && lv !== FULL_EXPAND) {
+      JP.notify(t('big_auto', JP.fmtNum(state.stats.nodes), lv));
     }
   }
 
-  /* ============================================================
-     动态层级展开按钮（按 JSON 实际层级，最多 10 级）
-     ============================================================ */
-  var MAX_LEVEL_BUTTONS = 10;
+  /**
+   * 估算「展开到第 L 层」会产出多少行，挑一个不超过 target 的最深层。
+   * 估算要考虑子节点分页：单个容器最多渲染 Model.PAGE 个子节点。
+   */
+  function levelForRows(st, target) {
+    if (!st || !st.depth) return FULL_EXPAND;
 
+    var total = 0;
+    var level = 0;
+    var renderedCont = 0;   // 上一层实际渲染出来的容器数
+
+    for (var d = 1; d <= st.depth; d++) {
+      var nodesHere = st.byDepth[d] || 0;
+      var contHere = st.byDepthCont[d] || 0;
+      var shown, extra;
+
+      if (d === 1) {
+        shown = 1;
+        extra = 0;
+      } else {
+        var prev = st.byDepth[d - 1] || 1;
+        var perContainer = Math.min(Model.PAGE, Math.max(1, Math.round(nodesHere / prev)));
+        shown = Math.min(nodesHere, renderedCont * perContainer);
+        extra = renderedCont * 2;         // 「加载更多」行 + 收口行
+      }
+
+      if (total + shown + extra > target) break;
+      total += shown + extra;
+      level = d - 1;
+      renderedCont = nodesHere > 0
+        ? Math.min(contHere, Math.round(contHere * shown / nodesHere))
+        : 0;
+    }
+
+    if (!st.truncated && level >= st.depth - 1) return FULL_EXPAND;
+    return level < 1 ? 1 : level;
+  }
+
+  function applyLevel(lv, quiet) {
+    if (!state.root) return;
+    Model.setExpandedToDepth(state.root, 0, lv);
+    View.setTree(Model.flatten(state.root));
+    setActiveLevel(lv === FULL_EXPAND ? null : lv);
+    if (!quiet) {
+      if (lv === FULL_EXPAND) JP.notify(t('expanded_all', state.stats ? state.stats.depth : 0));
+      else JP.notify(t('expanded_to', lv));
+    }
+  }
+
+  function rebuild() {
+    if (!state.root) return;
+    View.setTree(Model.flatten(state.root));
+  }
+
+  // 点击折叠箭头
+  function onToggle(e) {
+    var n = e.node;
+    if (!Model.isContainer(n)) return;
+    n.expanded = !n.expanded;
+    if (n.expanded) Model.ensureChildren(n, Model.childLimit(n));
+    rebuild();
+  }
+
+  // 点击「加载更多」：把该容器的子节点上限再翻一页
+  function onMore(e) {
+    var n = e.node;
+    n.limit = (n.limit || Model.PAGE) + Model.PAGE;
+    rebuild();
+  }
+
+  function clearAll() {
+    state.root = null;
+    state.stats = null;
+    state.outputText = '';
+    View.clear();
+    if (levelButtonsEl) levelButtonsEl.innerHTML = '';
+  }
+
+  /* ============================================================
+     层级展开按钮
+     ============================================================ */
   function renderLevelButtons() {
     if (!levelButtonsEl) return;
     levelButtonsEl.innerHTML = '';
-    var max = Math.min(state.depth, MAX_LEVEL_BUTTONS);
+    if (!state.stats) return;
+    var max = Math.min(state.stats.depth, MAX_LEVEL_BUTTONS);
     if (max <= 0) return;
 
     for (var lv = 1; lv <= max; lv++) {
@@ -614,32 +702,32 @@
   }
 
   function onLevelClick(lv) {
-    // 若当前不在格式化树状态（被压缩/转义等覆盖），先自动回到格式化
     ensureFormatted();
-    if (!state.root) { notify(t('fmt_first')); return; }
-    if (lv === 0) {
-      if (state.root.children) setExpandedToDepth(state.root, 0, FULL_EXPAND);
-      setActiveLevel(null);
-      notify(t('expanded_all', state.depth));
-    } else {
-      if (state.root.children) setExpandedToDepth(state.root, 0, lv);
-      setActiveLevel(lv);
-      notify(t('expanded_to', lv));
-    }
-    renderTree();
+    if (!state.root) { JP.notify(t('fmt_first')); return; }
+    if (lv === 0) expandAll();
+    else applyLevel(lv, false);
   }
 
-  // 确保当前处于格式化树状态；否则自动重新格式化
+  function expandAll() {
+    if (!state.root) { JP.notify(t('fmt_first')); return; }
+    var lv = levelForRows(state.stats, HARD_ROWS);
+    if (lv === FULL_EXPAND) {
+      applyLevel(FULL_EXPAND, false);
+    } else {
+      applyLevel(lv, true);
+      JP.notify(t('expand_limited', lv));
+    }
+  }
+
   function ensureFormatted() {
     if (state.root) return;
     if (!jsonInput.value.trim()) return;
-    doFormat();
+    doFormat(false, false);
   }
 
   function setActiveLevel(lv) {
     if (!levelButtonsEl) return;
-    var btns = levelButtonsEl.querySelectorAll('.lvl-btn');
-    btns.forEach(function (b) {
+    levelButtonsEl.querySelectorAll('.lvl-btn').forEach(function (b) {
       var bl = parseInt(b.dataset.level, 10);
       if (lv === null) b.classList.remove('active');
       else b.classList.toggle('active', bl === lv);
@@ -647,118 +735,65 @@
   }
 
   /* ============================================================
-     操作
-     ============================================================ */
-  function parseInput() {
-    var raw = jsonInput.value.trim();
-    if (!raw) throw new Error(t('input_empty'));
-    return JSON.parse(raw);
-  }
-
-  function buildState(data) {
-    state.root = buildNode(data, null);
-    var acc = { depth: 0, keys: 0, items: 0 };
-    measure(state.root, 0, acc);
-    state.depth = acc.depth;
-    state.keys = acc.keys;
-    state.items = acc.items;
-    renderLevelButtons();
-  }
-
-  // 首次格式化：默认全展开（可在 initSplitter 改 state.defaultExpandLevel 为具体层级）
-  function defaultExpand() {
-    if (!state.root || !state.root.children) return;
-    var lv = (state.defaultExpandLevel >= 99) ? FULL_EXPAND : state.defaultExpandLevel;
-    setExpandedToDepth(state.root, 0, lv);
-    setActiveLevel(lv === FULL_EXPAND ? null : lv);
-  }
-
-  // manual=true 表示用户主动点「格式化」按钮：成功/失败都给出宿主通知；
-  // 自动格式化（打字防抖触发）保持静默，错误仅渲染在结果区，避免打字时反复弹窗。
-  function doFormat(manual) {
-    try {
-      var data = parseInput();
-      state.outputText = JSON.stringify(data, null, 2);
-      syncInputPretty(state.outputText);   // 左侧同步为格式化后的内容
-      buildState(data);
-      defaultExpand();
-      renderTree();
-      if (manual) notify(t('formatted'));
-    } catch (e) {
-      renderJsonError(e.message);
-      if (manual) notify(t('json_err', e.message));
-    }
-  }
-
-  /* ---------- 左侧同步为格式化文本（保持光标逻辑位置） ----------
+     左侧同步为格式化文本（仅手动格式化时执行）
      JSON 美化只插入空白、不改变非空白字符顺序，故用「光标前非空白字符数」
-     做映射即可让光标大致停在同一逻辑位置，避免打字时跳位。          */
-  function caretLogicalPos(text, pos) {
-    var n = 0;
-    for (var i = 0; i < pos && i < text.length; i++) {
-      if (!/\s/.test(text.charAt(i))) n++;
-    }
-    return n;
-  }
-
-  function posFromLogical(text, n) {
-    if (n <= 0) return 0;
-    var c = 0;
-    for (var i = 0; i < text.length; i++) {
-      if (!/\s/.test(text.charAt(i))) {
-        c++;
-        if (c === n) return i + 1;
-      }
-    }
-    return text.length;
-  }
-
+     做映射即可让光标大致停在同一逻辑位置。
+     ============================================================ */
   function syncInputPretty(pretty) {
-    if (jsonInput.value === pretty) return;   // 值相同则不动，避免光标重置
+    if (jsonInput.value === pretty) return;
     var cur = jsonInput.value;
     var focused = (document.activeElement === jsonInput);
     var selStart = jsonInput.selectionStart;
     var selEnd = jsonInput.selectionEnd;
     var atEnd = (selEnd >= cur.length);
-    var lStart = caretLogicalPos(cur, selStart);
-    var lEnd = caretLogicalPos(cur, selEnd);
+    var lStart = JP.caretLogicalPos(cur, selStart);
+    var lEnd = JP.caretLogicalPos(cur, selEnd);
 
     jsonInput.value = pretty;
     updateCounter();
 
     if (focused) {
-      var s = atEnd ? pretty.length : posFromLogical(pretty, lStart);
-      var e = atEnd ? pretty.length : posFromLogical(pretty, lEnd);
+      var s = atEnd ? pretty.length : JP.posFromLogical(pretty, lStart);
+      var e = atEnd ? pretty.length : JP.posFromLogical(pretty, lEnd);
       try { jsonInput.setSelectionRange(s, e); } catch (err) { /* 忽略 */ }
     }
   }
 
+  /* ============================================================
+     纯文本模式（压缩 / 转义 / 错误）
+     ============================================================ */
+  function clipPlain(text) {
+    if (text.length > PLAIN_LIMIT) return text.slice(0, PLAIN_LIMIT) + t('plain_trunc', JP.fmtNum(PLAIN_LIMIT));
+    return text;
+  }
+
+  /* ============================================================
+     操作
+     ============================================================ */
   function doCompress() {
-    try {
-      var data = parseInput();
-      var mini = JSON.stringify(data);
-      jsonOutput.innerHTML = '<div class="row"><span class="plaintext">' + escapeHtml(mini) + '</span></div>';
-      state.outputText = mini;
-      state.root = null;
-      notify(t('compressed', mini.length));
-    } catch (e) {
-      notify(t('json_err', e.message));
-    }
+    var data;
+    try { data = parseInput(); }
+    catch (e) { JP.notify(t('json_err', e.message)); return; }
+    var mini = JSON.stringify(data);
+    state.root = null;
+    state.outputText = mini;
+    View.setPlain(clipPlain(mini), false);
+    JP.notify(t('compressed', JP.fmtNum(mini.length)));
   }
 
   function doEscape() {
     var raw = jsonInput.value.trim();
-    if (!raw) { notify(t('input_empty')); return; }
+    if (!raw) { JP.notify(t('input_empty')); return; }
     var escaped = JSON.stringify(raw);
-    jsonOutput.innerHTML = '<div class="row"><span class="plaintext">' + escapeHtml(escaped) + '</span></div>';
-    state.outputText = escaped;
     state.root = null;
-    notify(t('escaped'));
+    state.outputText = escaped;
+    View.setPlain(clipPlain(escaped), false);
+    JP.notify(t('escaped'));
   }
 
   function doUnescape() {
     var raw = jsonInput.value.trim();
-    if (!raw) { notify(t('input_empty')); return; }
+    if (!raw) { JP.notify(t('input_empty')); return; }
     var result;
     try {
       result = JSON.parse(raw);
@@ -766,86 +801,85 @@
       try {
         result = JSON.parse('"' + raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
       } catch (e2) {
-        notify(t('unescape_fail', e2.message));
+        JP.notify(t('unescape_fail', e2.message));
         return;
       }
     }
-    if (typeof result === 'string') {
-      jsonInput.value = result;
-      updateCounter();
-      doFormat();
-      notify(t('unescaped', state.depth));
-    } else {
-      jsonInput.value = JSON.stringify(result, null, 2);
-      updateCounter();
-      doFormat();
-      notify(t('unescaped', state.depth));
-    }
+    jsonInput.value = (typeof result === 'string') ? result : JSON.stringify(result, null, 2);
+    updateCounter();
+    doFormat(false, false, result);
+    JP.notify(t('unescaped', state.stats ? state.stats.depth : 0));
   }
 
-  /* ---------- 操作映射 ---------- */
+  function flashBtn(btn, ok) {
+    var old = btn.textContent;
+    btn.textContent = ok ? t('copied_flash') : t('copy_fail');
+    btn.classList.add(ok ? 'ok' : 'fail');
+    setTimeout(function () {
+      btn.textContent = old;
+      btn.classList.remove('ok', 'fail');
+    }, 1200);
+  }
+
   var ACTIONS = {
-    format: function () { doFormat(true); },
+    format: function () { doFormat(true, true); },
     compress: doCompress,
     escape: doEscape,
     unescape: doUnescape,
     collapse: function () {
       ensureFormatted();
-      if (!state.root) { notify(t('fmt_first')); return; }
-      if (state.root.children) setExpandedToDepth(state.root, 0, 0);
+      if (!state.root) { JP.notify(t('fmt_first')); return; }
+      applyLevel(0, true);
       setActiveLevel(null);
-      renderTree();
-      notify(t('collapsed_all'));
+      JP.notify(t('collapsed_all'));
     },
     expand: function () {
       ensureFormatted();
-      if (!state.root) { notify(t('fmt_first')); return; }
-      if (state.root.children) setExpandedToDepth(state.root, 0, FULL_EXPAND);
-      setActiveLevel(null);
-      renderTree();
-      notify(t('expanded_all', state.depth));
+      if (!state.root) { JP.notify(t('fmt_first')); return; }
+      expandAll();
     },
+    // 「清空」只清编辑区与结果区，不写回工作区文件 —— 避免一次误点把文件内容抹掉，
+    // 重新点一下树里的文件即可恢复。
     clear: function () {
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      dirty = false;
       jsonInput.value = '';
       updateCounter();
-      jsonOutput.innerHTML = '';
-      state.root = null;
-      state.outputText = '';
-      if (levelButtonsEl) levelButtonsEl.innerHTML = '';
+      clearAll();
     },
     copy: function () {
       ctxTarget = 'output';
       var text = state.outputText || jsonOutput.textContent;
-      if (!text) { notify(t('no_copy')); return; }
+      if (!text) { JP.notify(t('no_copy')); return; }
       var btn = document.querySelector('[data-action="copy"]');
-      copyText(text)
-        .then(function () { if (btn) flashBtn(btn, true); else notify(t('copied_all')); })
-        .catch(function () { if (btn) flashBtn(btn, false); else notify(t('copy_fail_manual')); });
+      JP.copyText(text)
+        .then(function () { if (btn) flashBtn(btn, true); else JP.notify(t('copied_all')); })
+        .catch(function () { if (btn) flashBtn(btn, false); else JP.notify(t('copy_fail_manual')); });
     },
     'copy-input': function () {
       var text = jsonInput.value;
-      if (!text) { notify(t('no_copy')); return; }
+      if (!text) { JP.notify(t('no_copy')); return; }
       var btn = document.querySelector('[data-action="copy-input"]');
-      copyText(text)
-        .then(function () { if (btn) flashBtn(btn, true); else notify(t('copied_raw')); })
-        .catch(function () { if (btn) flashBtn(btn, false); else notify(t('copy_fail')); });
+      JP.copyText(text)
+        .then(function () { if (btn) flashBtn(btn, true); else JP.notify(t('copied_raw')); })
+        .catch(function () { if (btn) flashBtn(btn, false); else JP.notify(t('copy_fail')); });
     },
     save: doSave,
     import: function () {
       if (fileInput) fileInput.click();
-      else notify(t('no_file_picker'));
-    }
+      else JP.notify(t('no_file_picker'));
+    },
+    // ---- 工作区（左侧文件树）----
+    'ws-toggle': function () { JPWS.toggleCollapsed(); }
   };
 
-  /* ---------- 导出 JSON：文件名默认为当前时间 ----------
-     优先走宿主 window.dbxPlugin.saveFile({fileName, contentType}, bytes)（真落盘）；
-     宿主不支持时回退浏览器下载（dev 宿主）。
-     ------------------------------------------------------------ */
+  /* ============================================================
+     导出 JSON
+     ============================================================ */
   function doSave() {
     var raw = jsonInput.value.trim();
-    if (!raw) { notify(t('no_save')); return; }
+    if (!raw) { JP.notify(t('no_save')); return; }
 
-    // 优先保存格式化后的完整文本；无法解析则保存原始文本
     var text = raw;
     var pretty = false;
     try {
@@ -853,37 +887,31 @@
       pretty = true;
     } catch (e) { /* 保存原文 */ }
 
-    var filename = defaultFileName();
-
+    var filename = JP.defaultFileName();
     saveTextFile(filename, text).then(function (saved) {
       var tail = pretty ? '' : t('saved_raw_tail');
       var where = saved ? ' → ' + saved : '';
-      notify(t('saved', filename + where) + tail);
+      JP.notify(t('saved', filename + where) + tail);
     }).catch(function (err) {
-      notify(t('save_fail', (err && err.message) || 'unknown'));
+      JP.notify(t('save_fail', (err && err.message) || 'unknown'));
     });
   }
 
-  // 保存文本文件；resolve(pathOrName) / reject(err)
-  // 与官方参考一致：宿主 saveFile 优先，失败回退浏览器下载
   function saveTextFile(fileName, text) {
     var contentType = 'application/json;charset=utf-8';
     var bytes = new TextEncoder().encode(text);
-
     var hostSave = (dbx && typeof dbx.saveFile === 'function')
       ? dbx.saveFile({ fileName: fileName, contentType: contentType }, bytes)
       : null;
 
     return Promise.resolve(hostSave).then(function (result) {
       if (result && result.path) return result.path;
-      // 宿主不可用或未返回路径 → 浏览器下载兜底
       return browserDownload(fileName, bytes, contentType);
     }).catch(function () {
       return browserDownload(fileName, bytes, contentType);
     });
   }
 
-  // 浏览器原生下载（dev 宿主 / 无 saveFile 的宿主）
   function browserDownload(fileName, bytes, contentType) {
     var url = URL.createObjectURL(new Blob([bytes], { type: contentType || 'application/octet-stream' }));
     var anchor = document.createElement('a');
@@ -896,27 +924,76 @@
     return fileName || null;
   }
 
-  // 文件名默认：YYYYMMDD-HHmmss.json
-  function defaultFileName() {
-    var d = new Date();
-    var p = function (v) { return ('0' + v).slice(-2); };
-    return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' +
-           p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.json';
+  // 文件名统一走 JP.defaultFileName()（见 core.js）：导出、自动保存、新建文件共用一份生成规则
+
+  /* ============================================================
+     杂项
+     ============================================================ */
+  function updateCounter() {
+    if (inputCounter) inputCounter.textContent = JP.fmtNum(jsonInput.value.length) + t('chars');
   }
 
-  /* ---------- 输入防抖重排 ---------- */
-  var timer = null;
+  // 输入防抖自动格式化；内容过大时暂停，改由手动触发
   function scheduleAuto() {
     if (timer) clearTimeout(timer);
     timer = setTimeout(function () {
-      if (!jsonInput.value.trim()) {
-        jsonOutput.innerHTML = '';
-        state.root = null;
-        state.outputText = '';
-        if (levelButtonsEl) levelButtonsEl.innerHTML = '';
+      var v = jsonInput.value;
+      if (!v.trim()) { clearAll(); return; }
+      if (v.length > AUTO_LIMIT) {
+        if (!state.autoOff) {
+          state.autoOff = true;
+          JP.notify(t('auto_off', JP.fmtNum(AUTO_LIMIT)));
+        }
         return;
       }
-      doFormat();
+      state.autoOff = false;
+      doFormat(false, false);
     }, 320);
+  }
+
+  /* ---------- 自动保存回工作区 ----------
+     两道闸：1) 真的改过（dirty）；2) 「保存」开关是开的。
+     没有目标文件时先建一个（不动编辑区），再把内容写进去。 */
+  function scheduleSave() {
+    if (!dirty) return;
+    if (!JPWS.saveEnabled()) return;
+
+    var bytes = JPWS.byteLength(jsonInput.value);
+    if (bytes > JPWS.MAX_SAVE_BYTES()) {
+      if (!saveWarned) {
+        saveWarned = true;
+        JP.notify(t('ws_too_large',
+          Math.round(bytes / 1024),
+          Math.round(JPWS.MAX_SAVE_BYTES() / 1024)));
+      }
+      return;
+    }
+    saveWarned = false;
+
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      saveTimer = null;
+      if (!dirty || !JPWS.saveEnabled()) return;
+      var text = jsonInput.value;
+      if (!text.trim()) return;
+      JPWS.ensureFile(JP.defaultFileName()).then(function (node) {
+        if (!node) return;
+        return JPWS.writeFile(node.id, text).then(function (ok) {
+          if (ok) dirty = false;
+        });
+      });
+    }, 600);
+  }
+
+  function flushSave() {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    if (!dirty || !JPWS.saveEnabled()) return;
+    var text = jsonInput.value;
+    if (!text.trim()) return;
+    var cur = JPWS.activeId();
+    if (cur) { JPWS.writeFile(cur, text); return; }
+    JPWS.ensureFile(JP.defaultFileName()).then(function (node) {
+      if (node) JPWS.writeFile(node.id, text);
+    });
   }
 })();
