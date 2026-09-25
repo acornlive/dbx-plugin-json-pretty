@@ -28,6 +28,16 @@
   }
 
   function createNode(value, key) {
+    // 无损大整数：losslessParse 将其包裹为 "JPBIG_xxxx"，还原为数字类型展示
+    if (typeof value === 'string' && value.indexOf('JPBIG_') === 0) {
+      return {
+        kind: 'number',
+        key: key,
+        raw: value,                         // 保留完整字符串供序列化还原
+        value: value.slice(6),              // 截掉前缀显示原始数字
+        children: null
+      };
+    }
     if (Array.isArray(value)) {
       return { kind: 'array', key: key, raw: value, size: value.length, expanded: false, children: null, limit: 0 };
     }
@@ -64,7 +74,11 @@
   };
 
   Model.serialize = function (node) {
-    try { return JSON.stringify(node.raw, null, 2); } catch (e) { return String(node.raw); }
+    try {
+      var json = JSON.stringify(node.raw, null, 2);
+      // 还原大整数标记
+      return json.replace(/"JPBIG_(-?\d+)"/g, '$1');
+    } catch (e) { return String(node.raw); }
   };
 
   /* ============================================================

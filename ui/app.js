@@ -26,6 +26,25 @@
   var HARD_ROWS = 200000;       // 「全部展开」的行数上限
   var MAX_LEVEL_BUTTONS = 10;
 
+  /* ---------- 无损大整数处理 ---------- */
+  var BIGINT_PREFIX = 'JPBIG_';
+
+  function losslessParse(text) {
+    // 将 >= 16 位的 JSON 整数包裹成字符串，避免 JSON.parse 精度丢失
+    // 正则：匹配 ^ [ , : 之后的大整数，后面跟着 ] } , 或结尾（用前瞻，不消耗定界符）
+    var wrapped = text.replace(
+      /((?:^|[\[,:])\s*)(-?\d{16,})(?=\s*(?:[\]},]|$))/g,
+      '$1"' + BIGINT_PREFIX + '$2"'
+    );
+    return JSON.parse(wrapped);
+  }
+
+  function losslessStringify(data, space) {
+    var json = JSON.stringify(data, null, space);
+    // 还原包裹的大整数："JPBIG_1234567890123456" → 1234567890123456
+    return json.replace(new RegExp('"' + BIGINT_PREFIX + '(-?\\d+)"', 'g'), '$1');
+  }
+
   /* ---------- 状态 ---------- */
   var state = {
     root: null,        // 当前 JSON 层级树根节点（子节点懒构建）
@@ -243,7 +262,7 @@
     updateCounter();
     var data;
     try {
-      data = JSON.parse(content);
+      data = losslessParse(content);
     } catch (e) {
       state.root = null;
       state.stats = null;
@@ -551,7 +570,7 @@
   function parseInput() {
     var raw = jsonInput.value.trim();
     if (!raw) throw new Error(t('input_empty'));
-    return JSON.parse(raw);
+    return losslessParse(raw);
   }
 
   /**
@@ -576,7 +595,7 @@
       }
     }
 
-    state.outputText = JSON.stringify(d, null, 2);
+    state.outputText = losslessStringify(d, 2);
     state.stats = Model.collectStats(d);
     state.root = Model.createNode(d, null);
     renderLevelButtons();
@@ -774,7 +793,7 @@
     var data;
     try { data = parseInput(); }
     catch (e) { JP.notify(t('json_err', e.message)); return; }
-    var mini = JSON.stringify(data);
+    var mini = losslessStringify(data);
     state.root = null;
     state.outputText = mini;
     View.setPlain(clipPlain(mini), false);
@@ -796,7 +815,7 @@
     if (!raw) { JP.notify(t('input_empty')); return; }
     var result;
     try {
-      result = JSON.parse(raw);
+      result = losslessParse(raw);
     } catch (e1) {
       try {
         result = JSON.parse('"' + raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
@@ -805,7 +824,7 @@
         return;
       }
     }
-    jsonInput.value = (typeof result === 'string') ? result : JSON.stringify(result, null, 2);
+    jsonInput.value = (typeof result === 'string') ? result : losslessStringify(result, 2);
     updateCounter();
     doFormat(false, false, result);
     JP.notify(t('unescaped', state.stats ? state.stats.depth : 0));
@@ -883,7 +902,7 @@
     var text = raw;
     var pretty = false;
     try {
-      text = JSON.stringify(JSON.parse(raw), null, 2) + '\n';
+      text = losslessStringify(losslessParse(raw), 2) + '\n';
       pretty = true;
     } catch (e) { /* 保存原文 */ }
 
