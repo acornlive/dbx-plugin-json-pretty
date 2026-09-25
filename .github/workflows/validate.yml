@@ -46,11 +46,11 @@ jobs:
           console.log("✓ manifest.json ≡ backend/main.go  identity:", manifest.id, manifest.version);
           NODE
 
-      - name: Install plugin CLI
-        run: npm install @dbx-app/plugin-cli@0.1.9 --no-save
+      - name: Install plugin CLI (global, avoid node_modules pollution)
+        run: sudo npm install -g @dbx-app/plugin-cli@0.1.9
 
       - name: Package Linux candidate
-        run: ./node_modules/.bin/dbx-plugin package . --target linux-x64 --output-dir dist
+        run: dbx-plugin package . --target linux-x64 --output-dir dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
