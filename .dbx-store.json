@@ -9,7 +9,8 @@
     "json"
   ],
   "permissions": [
-    "host.clipboard:read"
+    "host.clipboard:read",
+    "host.filesystem"
   ],
   "source": "https://github.com/acornlive/dbx-plugin-json-pretty",
   "homepage": "https://github.com/acornlive/dbx-plugin-json-pretty",
