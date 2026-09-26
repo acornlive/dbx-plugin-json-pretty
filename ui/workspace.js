@@ -23,10 +23,12 @@
   var PREFS_DEBOUNCE = 500;
 
   // 宿主对 invoke 参数有 2 MiB 硬上限（enforcePayloadLimit）。
-  // 超过这个体积，保存请求会直接在宿主侧被拒，前端只拿到一个含糊的失败 ——
-  // 所以前端先自己量一遍并明确提示，而不是等到传输失败。
-  var MAX_SAVE_BYTES = 1900 * 1000;
+  // 超过这个体积，保存请求会直接在宿主侧被拒，前端先自己量一遍并明确提示。
+  var MAX_SAVE_BYTES = 1900 * 1000;   // 与后端 maxContentBytes 对齐，给 JSON-RPC 信封留余量
   JPWS.MAX_SAVE_BYTES = function () { return MAX_SAVE_BYTES; };
+
+  // 读取上限：单次 RPC 传输超过此阈值会卡死界面，跳过自动加载并提示用户。
+  var READ_LIMIT = 500000;
 
   var ROOT = '#root';
 
@@ -386,11 +388,55 @@
     state.activeId = node.id;
     render();
     rpc('jp/setActive', { id: node.id }).catch(function () { /* 忽略 */ });
-    rpc('jp/readFile', { id: node.id }).then(function (fr) {
-      onOpen(node, (fr && fr.content) || '');
-    }).catch(function (e) {
-      JP.notify(JP.t('ws_read_fail', errText(e)));
-    });
+
+    var sz = node.size || 0;
+    if (sz > READ_LIMIT) {
+      // 大文件：分块读取，每块 256KB，绕过宿主 RPC 2 MiB 传输限额
+      readFileChunked(node.id, function (err, content) {
+        if (err) {
+          JP.notify(JP.t('ws_read_fail', errText(err)));
+          onOpen(node, '');
+          return;
+        }
+        onOpen(node, content);
+      });
+    } else {
+      // 小文件：一次 RPC 加载
+      rpc('jp/readFile', { id: node.id, maxBytes: READ_LIMIT }).then(function (fr) {
+        onOpen(node, (fr && fr.content) || '');
+      }).catch(function (e) {
+        JP.notify(JP.t('ws_read_fail', errText(e)));
+      });
+    }
+  }
+
+  // readFileChunked 通过逐块 RPC 调用拉取大文件，避免单次传输超时/超额。
+  // 与 jp/readFileChunk 后端配合，每次只传一小段字符串。
+  function readFileChunked(id, onDone) {
+    var CHUNK = 256 * 1024;
+    var parts = [];
+    var readOffset = 0;
+
+    function next() {
+      rpc('jp/readFileChunk', { id: id, offset: readOffset, length: CHUNK }).then(function (r) {
+        if (!r || !r.ok) {
+          onDone(new Error('truncated'), null);
+          return;
+        }
+        parts.push(r.content || '');
+        readOffset += r.length || 0;
+
+        if (r.length === 0 || readOffset >= r.total) {
+          onDone(null, parts.join(''));
+        } else {
+          next();
+        }
+      }).catch(function (e) {
+        onDone(e, null);
+      });
+    }
+
+    next();
   }
 
   /* ---------------- 行内重命名 ---------------- */
@@ -439,7 +485,8 @@
       { act: 'newfolder', label: 'ws_new_folder' },
       { act: 'move', label: 'ws_move' },
       { act: 'rename', label: 'ws_rename' },
-      { act: 'delete', label: 'ws_delete' }
+      { act: 'delete', label: 'ws_delete' },
+      { act: 'showInFolder', label: 'ws_show_in_folder' }
     ].forEach(function (item) {
       var b = document.createElement('button');
       b.className = 'tree-menu-item';
@@ -512,7 +559,7 @@
       var act = items[j].dataset.act;
       var visible = true;
       if (act === 'newfile' || act === 'newfolder') visible = !node || isContainer(node);
-      if (act === 'move' || act === 'rename' || act === 'delete') visible = !!node;
+      if (act === 'move' || act === 'rename' || act === 'delete' || act === 'showInFolder') visible = !!node;
       items[j].hidden = !visible;
     }
     menuEl.hidden = false;
@@ -533,6 +580,7 @@
       return;
     }
     if (act === 'delete' && node) { JPWS.deleteNode(node.id); return; }
+    if (act === 'showInFolder' && node) { JPWS.showInFolder(node.id); return; }
   }
 
   /* ---------------- 对外操作 ---------------- */
@@ -610,6 +658,13 @@
     return rpc('jp/readFile', { id: id }).then(function (r) { return (r && r.content) || ''; });
   };
 
+  // 在系统文件管理器中打开文件所在的本地目录（文件存在则选中该文件）
+  JPWS.showInFolder = function (id) {
+    if (!id) return;
+    return rpc('jp/showInFolder', { id: id })
+      .catch(function (e) { JP.notify(JP.t('ws_show_in_folder_fail', errText(e))); });
+  };
+
   JPWS.writeFile = function (id, content) {
     if (!id) return Promise.resolve(false);
     if (byteLength(content) > MAX_SAVE_BYTES) {
@@ -638,6 +693,14 @@
         return refresh().then(function () { return node; });
       })
       .catch(function (e) { JP.notify(JP.t('ws_import_fail', errText(e))); return null; });
+  };
+
+  // chunked 导入的后半段：后端已落盘完，前端切到这个文件并刷新树
+  JPWS.finishChunkedImport = function (nodeId, name, content) {
+    var node = state.byId[nodeId] || { id: nodeId, name: name, type: 'file' };
+    state.activeId = nodeId;
+    onOpen(node, content);
+    return refresh().then(function () { return node; });
   };
 
   JPWS.setActive = function (id) {

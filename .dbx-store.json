@@ -14,5 +14,5 @@
   "source": "https://github.com/acornlive/dbx-plugin-json-pretty",
   "homepage": "https://github.com/acornlive/dbx-plugin-json-pretty",
   "license": "MIT",
-  "releaseNotes": "大文件虚拟滚动、大文件自动折叠、宿主剪贴板桥接、工作区侧栏文件树可自动保存导入和黏贴的json"
+  "releaseNotes": "大文件虚拟滚动、宿主剪贴板桥接、工作区侧栏文件树可自动保存导入和黏贴的json、支持拖拽文件解析"
 }

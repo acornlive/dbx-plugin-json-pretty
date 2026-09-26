@@ -3,23 +3,27 @@ package main
 // 工作区存储模型
 // -----------------------------------------------------------------------------
 //   - 索引：<dataDir>/workspace.json（id / 类型 / 名称 / 父子关系 / 时间戳 + UI 状态）
-//   - 正文：<dataDir>/files/<id>.json（每个文件一个独立文件）
+//   - 正文：<dataDir>/files/<tree-path>（目录/文件名与工作区树完全一致）
 //
-// 为什么正文按 id 存而不是按「文件夹层级/名称.json」落盘：
-//   1) 重命名、移动只改索引，不需要搬动磁盘文件，不会出现「改名失败留下半个文件」；
-//   2) 名称里的非法字符（\ / : * ? 等）完全不参与路径拼接，没有路径穿越面；
-//   3) 写一个文件不会重写整个索引，写入放大可控。
+// 为什么正文按树路径落盘而不是按 id 存：
+//   "打开本地文件夹"功能要求用户能在文件管理器里找到实际文件，
+//   用 UUID 命名会导致文件夹里一堆无意义文件名，完全无法对应。
+//   树路径方案确保 files/ 目录结构与工作区所见一致。
 //
 // 为什么正文不塞进 workspace.json：本工具面向大 JSON，单文件可能上 MB，
 // 任何一次保存都重写整份索引会让写盘成本随文件数线性增长。
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -74,9 +78,41 @@ func dataDir() string {
 	return filepath.Join(".", "data")
 }
 
-func filesDir() string          { return filepath.Join(dataDir(), "files") }
-func indexPath() string         { return filepath.Join(dataDir(), "workspace.json") }
-func filePath(id string) string { return filepath.Join(filesDir(), id+".json") }
+func filesDir() string  { return filepath.Join(dataDir(), "jpfiles") }
+func indexPath() string { return filepath.Join(dataDir(), "workspace.json") }
+
+// nodePathParts 从节点沿 parentId 链回溯到根，返回路径段（用于拼接文件系统路径）。
+// 返回的路径段已包含文件名（对文件）或目录名（对文件夹），各段经 sanitizeName 处理过。
+func nodePathParts(nodes []Node, id string) []string {
+	byID := make(map[string]Node, len(nodes))
+	for _, n := range nodes {
+		byID[n.ID] = n
+	}
+	var parts []string
+	cur := id
+	for guard := 0; guard < 256; guard++ {
+		n, ok := byID[cur]
+		if !ok {
+			break
+		}
+		parts = append([]string{n.Name}, parts...)
+		if n.ParentID == nil {
+			break
+		}
+		cur = *n.ParentID
+	}
+	return parts
+}
+
+// filePath 根据工作区树结构计算节点在文件系统上的真实路径。
+// 这样 files/ 下的目录/文件名与工作区所见完全一致，用户用"打开本地文件夹"能直接找到对应文件。
+func filePath(nodes []Node, id string) string {
+	parts := nodePathParts(nodes, id)
+	if len(parts) == 0 {
+		return filepath.Join(filesDir(), id)
+	}
+	return filepath.Join(filesDir(), filepath.Join(parts...))
+}
 
 // ---------------- 索引读写 ----------------
 
@@ -264,13 +300,20 @@ func opCreateNode(typ, name string, parentID *string) (any, error) {
 	id := newID()
 	now := nowStr()
 	node := Node{ID: id, Type: typ, Name: nm, ParentID: parentID, CreatedAt: now, UpdatedAt: now}
+
+	// 必须先把节点加进数组再调用 filePath —— 否则 nodePathParts 回溯不到新节点，
+	// 会回退到 files/<id> 的旧格式路径，留下一个 UUID 命名的孤儿空文件。
+	d.Nodes = append(d.Nodes, node)
+
 	if typ == "file" {
-		if err := writeAtomic(filePath(id), []byte("")); err != nil {
+		if err := writeAtomic(filePath(d.Nodes, id), []byte("")); err != nil {
 			return nil, err
 		}
 		d.ActiveID = id
+	} else {
+		// 文件夹：创建对应的磁盘目录，让"打开本地文件夹"时能看到与树一致的结构
+		_ = os.MkdirAll(filePath(d.Nodes, id), 0o755)
 	}
-	d.Nodes = append(d.Nodes, node)
 	if err := saveDoc(d); err != nil {
 		return nil, err
 	}
@@ -286,12 +329,29 @@ func opRenameNode(id, name string) (any, error) {
 	if n == nil {
 		return nil, fmt.Errorf("node not found")
 	}
+
+	oldPath := filePath(d.Nodes, id)
+
 	nm := sanitizeName(name)
 	if strings.TrimSpace(name) == "" {
 		nm = defaultName(n.Type)
 	}
 	n.Name = uniqueName(d.Nodes, n.ParentID, nm, id)
 	n.UpdatedAt = nowStr()
+
+	newPath := filePath(d.Nodes, id)
+	if oldPath != newPath {
+		// 旧路径可能不存在（新建未写入的文件），忽略错误
+		if _, stErr := os.Stat(oldPath); stErr == nil {
+			if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+				return nil, fmt.Errorf("rename: mkdir parent: %w", err)
+			}
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return nil, fmt.Errorf("rename: %w", err)
+			}
+		}
+	}
+
 	if err := saveDoc(d); err != nil {
 		return nil, err
 	}
@@ -330,6 +390,9 @@ func opMoveNode(id string, parentID *string, index *int) (any, error) {
 		d.Expanded[*parentID] = true
 	}
 
+	// 在修改节点结构前先保存旧路径（os.Rename 移动整个子树之前需要知道原位置）
+	oldPath := filePath(d.Nodes, id)
+
 	pos := -1
 	for i := range d.Nodes {
 		if d.Nodes[i].ID == id {
@@ -361,6 +424,19 @@ func opMoveNode(id string, parentID *string, index *int) (any, error) {
 	copy(d.Nodes[insertAt+1:], d.Nodes[insertAt:])
 	d.Nodes[insertAt] = moved
 
+	// 移动磁盘上的文件/目录：os.Rename 对目录会递归移动整棵子树
+	newPath := filePath(d.Nodes, id)
+	if oldPath != newPath {
+		if _, stErr := os.Stat(oldPath); stErr == nil {
+			if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+				return nil, fmt.Errorf("move: mkdir parent: %w", err)
+			}
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return nil, fmt.Errorf("move: %w", err)
+			}
+		}
+	}
+
 	if err := saveDoc(d); err != nil {
 		return nil, err
 	}
@@ -377,15 +453,21 @@ func opDeleteNode(id string) (any, error) {
 		return nil, fmt.Errorf("node not found")
 	}
 	inc := subtreeIDs(d, id)
+
+	// 在删除节点之前先记录磁盘路径 —— filePath 依赖 d.Nodes 回溯源链，
+	// 一旦节点从数组里移除就无法回溯了。
+	toRemove := map[string]bool{}
+	for _, x := range d.Nodes {
+		if inc[x.ID] {
+			toRemove[filePath(d.Nodes, x.ID)] = true
+		}
+	}
+
 	kept := []Node{}
-	deleted := []string{} // 全部被删节点（前端据此从树里摘掉整棵子树）
-	files := []string{}   // 其中有正文需要一并删除的文件
+	deleted := []string{}
 	for _, x := range d.Nodes {
 		if inc[x.ID] {
 			deleted = append(deleted, x.ID)
-			if x.Type == "file" {
-				files = append(files, x.ID)
-			}
 			continue
 		}
 		kept = append(kept, x)
@@ -394,18 +476,27 @@ func opDeleteNode(id string) (any, error) {
 	if inc[d.ActiveID] {
 		d.ActiveID = ""
 	}
-	for _, rid := range files {
-		_ = os.Remove(filePath(rid))
-	}
+
+	// 先保存索引，再清理磁盘（即使清理失败，索引已指向新状态，不会丢数据）
 	if err := saveDoc(d); err != nil {
 		return nil, err
 	}
+
+	for p := range toRemove {
+		_ = os.RemoveAll(p) // RemoveAll：文件直接删；空目录也顺带清理
+	}
+
 	return map[string]any{"ok": true, "deletedIds": deleted}, nil
 }
 
-func opReadFile(id string) (any, error) {
+func opReadFile(id string, maxBytes int) (any, error) {
 	if !safeID(id) {
 		return nil, fmt.Errorf("invalid id")
+	}
+	if maxBytes <= 0 {
+		// 没传限制时用安全上限：宿主 RPC 传输层有 2 MiB 硬限额，
+		// JSON 编码会让字符串膨胀（转义），取 1.5 MiB 留余量。
+		maxBytes = 1500 * 1000
 	}
 	d := loadDoc()
 	_, n := findNode(d, id)
@@ -415,13 +506,86 @@ func opReadFile(id string) (any, error) {
 	if n.Type != "file" {
 		return nil, fmt.Errorf("node is not a file")
 	}
-	data, err := os.ReadFile(filePath(id))
+	path := filePath(d.Nodes, id)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
+	}
+	if info.Size() > int64(maxBytes) {
+		return nil, fmt.Errorf("file too large: %d bytes (limit %d)", info.Size(), maxBytes)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 	return map[string]any{
 		"ok": true, "id": n.ID, "name": n.Name,
 		"content": string(data), "size": len(data),
+	}, nil
+}
+
+// ---------------- 分块读取 ----------------
+// 写入路径有分块机制（beginWrite/appendChunk/endWrite）能绕过宿主 2 MiB 传输限额，
+// 但读取路径一直没有对应机制，大文件单次 RPC 返回整个内容会超时或被宿主拒收。
+// opReadFileChunk 弥补这一点：前端按 offset + length 逐块拉取，每次只传一小段字符串。
+func opReadFileChunk(id string, offset, length int) (any, error) {
+	if !safeID(id) {
+		return nil, fmt.Errorf("invalid id")
+	}
+	if offset < 0 || length <= 0 || length > maxChunkBytes*2 {
+		return nil, fmt.Errorf("invalid offset/length")
+	}
+	d := loadDoc()
+	_, n := findNode(d, id)
+	if n == nil {
+		return nil, fmt.Errorf("file not found")
+	}
+	if n.Type != "file" {
+		return nil, fmt.Errorf("node is not a file")
+	}
+
+	path := filePath(d.Nodes, id)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat: %w", err)
+	}
+	total := int(info.Size())
+	if offset >= total {
+		return map[string]any{
+			"ok": true, "id": n.ID,
+			"offset": offset, "length": 0, "total": total,
+			"content": "",
+		}, nil
+	}
+
+	readLen := length
+	if offset+readLen > total {
+		readLen = total - offset
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(int64(offset), 0); err != nil {
+		return nil, fmt.Errorf("seek: %w", err)
+	}
+
+	buf := make([]byte, readLen)
+	nread, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+
+	return map[string]any{
+		"ok":      true,
+		"id":      n.ID,
+		"offset":  offset,
+		"length":  nread,
+		"total":   total,
+		"content": string(buf[:nread]),
 	}, nil
 }
 
@@ -440,7 +604,7 @@ func opWriteFile(id, content string) (any, error) {
 	if d.Nodes[i].Type != "file" {
 		return nil, fmt.Errorf("node is not a file")
 	}
-	if err := writeAtomic(filePath(id), []byte(content)); err != nil {
+	if err := writeAtomic(filePath(d.Nodes, id), []byte(content)); err != nil {
 		return nil, err
 	}
 	d.Nodes[i].Size = int64(len(content))
@@ -468,10 +632,10 @@ func opImportFile(name, content string, parentID *string) (any, error) {
 	if !ok2 || node.ID == "" {
 		return nil, fmt.Errorf("unexpected create result")
 	}
-	if err := writeAtomic(filePath(node.ID), []byte(content)); err != nil {
+	d := loadDoc()
+	if err := writeAtomic(filePath(d.Nodes, node.ID), []byte(content)); err != nil {
 		return nil, err
 	}
-	d := loadDoc()
 	for i := range d.Nodes {
 		if d.Nodes[i].ID == node.ID {
 			d.Nodes[i].Size = int64(len(content))
@@ -616,6 +780,176 @@ func writeAtomic(path string, b []byte) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	return nil
+}
+
+// ---------------- 分块写入 ----------------
+// 拖放导入走 fileTransfer.read() 流式读取，每个 chunk 单独一次 RPC 推给后端；
+// 单次 invoke 参数不会超过 500 KB，远低于宿主 2 MiB 硬上限，多 GB 文件也能落盘。
+
+const maxChunkBytes = 500 * 1024 // 解码后的原始字节上限（256 KB chunk 经 base64 膨化 ≈ 341 KB）
+
+func opBeginWrite(id string) (any, error) {
+	if !safeID(id) {
+		return nil, fmt.Errorf("invalid id")
+	}
+	d := loadDoc()
+	_, n := findNode(d, id)
+	if n == nil {
+		return nil, fmt.Errorf("node not found")
+	}
+	if n.Type != "file" {
+		return nil, fmt.Errorf("not a file")
+	}
+	_ = os.Remove(tmpChunkPath(d.Nodes, id))
+	return map[string]any{"ok": true}, nil
+}
+
+func opAppendChunk(id, b64 string) (any, error) {
+	if !safeID(id) {
+		return nil, fmt.Errorf("invalid id")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 chunk")
+	}
+	if len(decoded) > maxChunkBytes {
+		return nil, fmt.Errorf("chunk too large: %d bytes (limit %d)", len(decoded), maxChunkBytes)
+	}
+	// 需要文档来解析路径（分块写入的文件可能刚创建，路径依赖树结构）
+	d := loadDoc()
+	if _, n := findNode(d, id); n == nil {
+		return nil, fmt.Errorf("node not found")
+	}
+	tmpPath := tmpChunkPath(d.Nodes, id)
+	f, err := os.OpenFile(tmpPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := f.Write(decoded); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func opEndWrite(id string) (any, error) {
+	if !safeID(id) {
+		return nil, fmt.Errorf("invalid id")
+	}
+	d := loadDoc()
+	i, n := findNode(d, id)
+	if n == nil {
+		return nil, fmt.Errorf("node not found")
+	}
+	if n.Type != "file" {
+		return nil, fmt.Errorf("not a file")
+	}
+	tmpPath := tmpChunkPath(d.Nodes, id)
+	stat, err := os.Stat(tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("no pending write for %s", id)
+	}
+	finalPath := filePath(d.Nodes, id)
+	_ = os.Remove(finalPath)
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return nil, err
+	}
+	d.Nodes[i].Size = stat.Size()
+	d.Nodes[i].UpdatedAt = nowStr()
+	if err := saveDoc(d); err != nil {
+		fmt.Fprintf(os.Stderr, "[jp] saveDoc after endWrite failed: %v\n", err)
+	}
+	return map[string]any{"ok": true, "size": stat.Size(), "updatedAt": d.Nodes[i].UpdatedAt}, nil
+}
+
+func tmpChunkPath(nodes []Node, id string) string { return filePath(nodes, id) + ".chunk" }
+
+// ---------------- 文件系统同步（启动时清理孤儿文件） ----------------
+// syncFS 遍历 files/ 目录，删除不属于任何当前工作区节点的孤儿文件。
+// 这些孤儿文件的来源：此前 opCreateNode 在节点未加入数组时调 filePath，
+// 回退到 files/<id> 路径写了一个空文件；后续 deleteNode 按正确树路径删，
+// 孤儿文件永远留在磁盘上。本函数在 main() 启动时调用一次。
+func syncFS() {
+	d := loadDoc()
+	if len(d.Nodes) == 0 {
+		return
+	}
+
+	// 收集所有预期存在的路径（含 .chunk 临时文件）
+	expected := map[string]bool{}
+	for _, n := range d.Nodes {
+		expected[filePath(d.Nodes, n.ID)] = true
+		if n.Type == "file" {
+			expected[filePath(d.Nodes, n.ID)+".chunk"] = true
+		}
+	}
+
+	entries, err := os.ReadDir(filesDir())
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "." || name == ".." {
+			continue
+		}
+		full := filepath.Join(filesDir(), name)
+		if expected[full] {
+			continue
+		}
+		// 文件夹保守处理：不删用户可能手动放进去的内容
+		if entry.IsDir() {
+			continue
+		}
+		_ = os.Remove(full)
+	}
+}
+
+// ---------------- 在系统文件管理器中定位 ----------------
+
+func opShowInFolder(id string) error {
+	if !safeID(id) {
+		return fmt.Errorf("invalid id")
+	}
+	d := loadDoc()
+	_, n := findNode(d, id)
+	if n == nil {
+		return fmt.Errorf("node not found")
+	}
+
+	targetPath := filePath(d.Nodes, id)
+
+	// 如果目标文件不存在（新建但还没写入），退回到 files 目录
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+		targetPath = filesDir()
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		// /select, 参数让资源管理器打开所在目录并选中该文件
+		cmd = exec.Command("explorer", "/select,", targetPath)
+	case "darwin":
+		cmd = exec.Command("open", "-R", targetPath)
+	default:
+		// Linux 等：能用 xdg-open 就打开目录，否则退回
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			dir := filepath.Dir(targetPath)
+			if st, e := os.Stat(dir); e == nil && st.IsDir() {
+				cmd = exec.Command("xdg-open", dir)
+			} else {
+				cmd = exec.Command("xdg-open", filesDir())
+			}
+		} else {
+			return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		}
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to open folder: %v", err)
 	}
 	return nil
 }

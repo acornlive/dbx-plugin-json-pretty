@@ -54,7 +54,7 @@
   };
 
   /* ---------- 元素引用 ---------- */
-  var jsonInput, jsonOutput, inputCounter, splitEl, resizerEl, levelButtonsEl, ctxMenu, fileInput;
+  var jsonInput, jsonOutput, inputCounter, splitEl, resizerEl, levelButtonsEl, ctxMenu;
   var jvCanvas, jvRows, jvPlain;
   var treePane, treeList, resizerTree;
   var wsToggleBtn, wsStateIcon, wsSaveToggle;
@@ -91,6 +91,170 @@
       onLayout: syncLayoutFromPrefs,
       onFlush: flushSave
     });
+
+    initFileDrop();
+  }
+
+  /* ---------------- 拖放导入 ---------------- */
+
+  function initFileDrop() {
+    var ft = (window.dbxPlugin && window.dbxPlugin.fileTransfer) || null;
+    var overlay = document.getElementById('dropOverlay');
+    if (!overlay) return;
+
+    // DBX 桌面宿主：使用 fileTransfer API
+    if (ft) {
+      ft.onDragState(function (active) {
+        overlay.hidden = !active;
+      });
+
+      ft.onDrop(function (files) {
+        overlay.hidden = true;
+        if (!files || !files.length) return;
+        importDroppedFiles(files, ft);
+      });
+      return;
+    }
+
+    // Web 宿主回退：原生 HTML5 拖放
+    var dragCount = 0;
+
+    document.addEventListener('dragenter', function (e) {
+      e.preventDefault();
+      dragCount++;
+      if (overlay) overlay.hidden = false;
+    });
+
+    document.addEventListener('dragover', function (e) {
+      e.preventDefault();
+    });
+
+    document.addEventListener('dragleave', function () {
+      dragCount--;
+      if (dragCount <= 0) {
+        dragCount = 0;
+        if (overlay) overlay.hidden = true;
+      }
+    });
+
+    document.addEventListener('drop', function (e) {
+      e.preventDefault();
+      dragCount = 0;
+      if (overlay) overlay.hidden = true;
+      var dtFiles = e.dataTransfer && e.dataTransfer.files;
+      if (!dtFiles || !dtFiles.length) return;
+      for (var i = 0; i < dtFiles.length; i++) {
+        readFileInto(dtFiles[i]);
+      }
+    });
+  }
+
+  // DBX 桌面：逐块读取拖入的文件句柄
+  function importDroppedFiles(files, ft) {
+    var queue = Array.prototype.slice.call(files || []);
+    if (!queue.length) return;
+
+    function next() {
+      var f = queue.shift();
+      if (!f) return;
+      readDroppedFile(f, ft)
+        .catch(function (e) {
+          JP.notify(JP.t('ws_import_fail', (e && e.message) || 'unknown'));
+        })
+        .then(next);
+    }
+    next();
+  }
+
+  // 通用分块导入：readChunkFn(offset, chunkSize) → Promise<{dataBase64, length, eof}>
+  // onFinish() 在所有分块发送完后、endWrite 前被调用（用于 fileTransfer.cancel 等收尾）
+  function importFileChunked(name, readChunkFn, onFinish) {
+    var CHUNK = 256 * 1024;
+    var contentParts = [];
+    var nodeId = '';
+    var offset = 0;
+
+    // 1) 创建工作区节点
+    return JPWS.invoke('jp/createNode', {
+      type: 'file',
+      name: name,
+      parentId: JPWS.currentFolder() || null
+    }).then(function (r) {
+      var node = r && r.node;
+      if (!node) throw new Error('创建文件失败');
+      nodeId = node.id;
+      // 2) 开始分块写入
+      return JPWS.invoke('jp/beginWrite', { id: nodeId });
+    }).then(function () {
+      // 3) 逐块读取并推给后端
+      function readNext() {
+        return readChunkFn(offset, CHUNK).then(function (chunk) {
+          var p = Promise.resolve();
+          if (chunk.dataBase64) {
+            var binary = atob(chunk.dataBase64);
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            contentParts.push(new TextDecoder('utf-8').decode(bytes));
+            p = JPWS.invoke('jp/appendChunk', { id: nodeId, content: chunk.dataBase64 });
+          }
+          if (chunk.eof) { return p; }
+          return p.then(function () {
+            offset += chunk.length;
+            return readNext();
+          });
+        });
+      }
+      return readNext();
+    }).then(function () {
+      // 收尾（fileTransfer.cancel 等）
+      return onFinish ? onFinish() : Promise.resolve();
+    }).then(function () {
+      // 4) 结束写入并落盘
+      return JPWS.invoke('jp/endWrite', { id: nodeId });
+    }).then(function () {
+      // 5) 加载到编辑区并刷新工作区树
+      var content = contentParts.join('');
+      return JPWS.finishChunkedImport(nodeId, name, content);
+    }).catch(function (e) {
+      if (nodeId) {
+        JPWS.invoke('jp/deleteNode', { id: nodeId }).catch(function () {});
+      }
+      throw e;
+    });
+  }
+
+  // 桌端拖放：复用通用分块、用 fileTransfer.read 做 chunk 源
+  function readDroppedFile(file, ft) {
+    return importFileChunked(file.name || 'untitled.json',
+      function (offset, size) {
+        return ft.read(file.handleId, offset, size);
+      },
+      function () {
+        return ft.cancel(file.handleId);
+      }
+    );
+  }
+
+  // 导入按钮用：File.slice() + FileReader.readAsDataURL 模拟分块读
+  function readBlobChunked(file) {
+    return importFileChunked(file.name,
+      function (offset, size) {
+        return new Promise(function (resolve, reject) {
+          var slice = file.slice(offset, offset + size);
+          var reader = new FileReader();
+          reader.onload = function () {
+            var dataUrl = String(reader.result || '');
+            var comma = dataUrl.indexOf(',');
+            var b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+            resolve({ dataBase64: b64, length: slice.size, eof: offset + size >= file.size });
+          };
+          reader.onerror = function () {
+            reject(new Error((reader.error && reader.error.message) || '读取文件失败'));
+          };
+          reader.readAsDataURL(slice);
+        });
+      }
+    );
   }
 
   // 工作区把某个文件的内容交给编辑区
@@ -112,7 +276,6 @@
     resizerEl = $('resizer');
     levelButtonsEl = $('levelButtons');
     ctxMenu = $('ctxMenu');
-    fileInput = $('fileInput');
     jvCanvas = $('jvCanvas');
     jvRows = $('jvRows');
     jvPlain = $('jvPlain');
@@ -180,15 +343,6 @@
      事件绑定
      ============================================================ */
   function bindUI() {
-    if (fileInput) {
-      fileInput.addEventListener('change', function () {
-        var f = fileInput.files && fileInput.files[0];
-        if (!f) return;
-        readFileInto(f);
-        fileInput.value = '';
-      });
-    }
-
     jsonInput.addEventListener('input', function () {
       dirty = true;
       updateCounter();
@@ -245,6 +399,16 @@
      ============================================================ */
   function loadFromFile(name, content) {
     content = content.replace(/^\uFEFF/, '');
+
+    // 不管工作区是否可用，太大先拦
+    var maxBytes = JPWS.MAX_SAVE_BYTES();
+    var fileBytes = typeof TextEncoder !== 'undefined'
+      ? (function () { try { return new TextEncoder().encode(content).length; } catch (e) { return content.length; } })()
+      : content.length;
+    if (fileBytes > maxBytes) {
+      JP.notify(JP.t('ws_too_large', Math.round(fileBytes / 1024), Math.round(maxBytes / 1024)));
+      return;
+    }
 
     // 开了「保存」：导入 = 在工作区当前目录下新建一个文件并打开，之后编辑自动存回去
     if (JPWS.available() && JPWS.saveEnabled()) {
@@ -318,9 +482,11 @@
 
   function showCtxMenu(x, y) {
     ctxMenu.hidden = false;
-    // 粘贴只在左侧编辑区（textarea）可用，右侧查看区不提供
+    // 粘贴 / 清空 只在左侧编辑区（textarea）可用，右侧查看区不提供
     var pasteBtn = ctxMenu.querySelector('[data-act="paste"]');
     if (pasteBtn) pasteBtn.hidden = (ctxTarget !== 'input');
+    var clearBtn = ctxMenu.querySelector('[data-act="clear-input"]');
+    if (clearBtn) clearBtn.hidden = (ctxTarget !== 'input');
     var w = ctxMenu.offsetWidth || 150;
     var h = ctxMenu.offsetHeight || 120;
     var vw = window.innerWidth, vh = window.innerHeight;
@@ -334,6 +500,7 @@
 
   function handleCtx(act) {
     if (act === 'paste') { doPaste(); return; }
+    if (act === 'clear-input') { ACTIONS.clear(); return; }
     if (act !== 'copy-sel') return;
     var sel;
     if (ctxTarget === 'input') {
@@ -882,11 +1049,6 @@
       JP.copyText(text)
         .then(function () { if (btn) flashBtn(btn, true); else JP.notify(t('copied_raw')); })
         .catch(function () { if (btn) flashBtn(btn, false); else JP.notify(t('copy_fail')); });
-    },
-    save: doSave,
-    import: function () {
-      if (fileInput) fileInput.click();
-      else JP.notify(t('no_file_picker'));
     },
     // ---- 工作区（左侧文件树）----
     'ws-toggle': function () { JPWS.toggleCollapsed(); }

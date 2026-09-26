@@ -125,12 +125,28 @@ func (p *plugin) Handle(
 
 	case "jp/readFile":
 		var q struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			MaxBytes int    `json:"maxBytes"`
 		}
 		if e := decodeParams(params, &q); e != nil {
 			return nil, e
 		}
-		res, err := opReadFile(q.ID)
+		res, err := opReadFile(q.ID, q.MaxBytes)
+		if err != nil {
+			return nil, failed(-32004, err)
+		}
+		return res, nil
+
+	case "jp/readFileChunk":
+		var q struct {
+			ID     string `json:"id"`
+			Offset int    `json:"offset"`
+			Length int    `json:"length"`
+		}
+		if e := decodeParams(params, &q); e != nil {
+			return nil, e
+		}
+		res, err := opReadFileChunk(q.ID, q.Offset, q.Length)
 		if err != nil {
 			return nil, failed(-32004, err)
 		}
@@ -160,6 +176,46 @@ func (p *plugin) Handle(
 			return nil, e
 		}
 		res, err := opImportFile(q.Name, q.Content, q.ParentID)
+		if err != nil {
+			return nil, failed(-32005, err)
+		}
+		return res, nil
+
+	case "jp/beginWrite":
+		var q struct {
+			ID string `json:"id"`
+		}
+		if e := decodeParams(params, &q); e != nil {
+			return nil, e
+		}
+		res, err := opBeginWrite(q.ID)
+		if err != nil {
+			return nil, failed(-32002, err)
+		}
+		return res, nil
+
+	case "jp/appendChunk":
+		var q struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+		}
+		if e := decodeParams(params, &q); e != nil {
+			return nil, e
+		}
+		res, err := opAppendChunk(q.ID, q.Content)
+		if err != nil {
+			return nil, failed(-32005, err)
+		}
+		return res, nil
+
+	case "jp/endWrite":
+		var q struct {
+			ID string `json:"id"`
+		}
+		if e := decodeParams(params, &q); e != nil {
+			return nil, e
+		}
+		res, err := opEndWrite(q.ID)
 		if err != nil {
 			return nil, failed(-32005, err)
 		}
@@ -217,6 +273,18 @@ func (p *plugin) Handle(
 		}
 		return map[string]any{"ok": true, "prefs": d.Prefs}, nil
 
+	case "jp/showInFolder":
+		var q struct {
+			ID string `json:"id"`
+		}
+		if e := decodeParams(params, &q); e != nil {
+			return nil, e
+		}
+		if err := opShowInFolder(q.ID); err != nil {
+			return nil, failed(-32002, err)
+		}
+		return map[string]any{"ok": true}, nil
+
 	default:
 		return nil, dbxpluginsdk.MethodNotFound(method)
 	}
@@ -260,6 +328,10 @@ func resolveMetadata() dbxpluginsdk.Metadata {
 func main() {
 	_ = os.MkdirAll(dataDir(), 0o755)
 	_ = os.MkdirAll(filesDir(), 0o755)
+
+	// 启动时清理上一次运行留下的孤儿文件（UUID 命名的空文件）。
+	// 详见 store.go syncFS 注释。
+	syncFS()
 
 	metadata := resolveMetadata()
 	server := dbxpluginsdk.NewServer(metadata, &plugin{})

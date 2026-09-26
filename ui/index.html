@@ -21,8 +21,6 @@
       <button class="btn" data-action="collapse" data-i18n="collapse_all">全部折叠</button>
       <button class="btn" data-action="expand" data-i18n="expand_all">全部展开</button>
       <button class="btn" data-action="clear" data-i18n="clear">清空</button>
-      <button class="btn" data-action="import" data-i18n="import" data-i18n-title="import_title" title="选择本地 .json 文件导入">导入</button>
-      <button class="btn" data-action="save" data-i18n="save" data-i18n-title="save_title" title="导出为 JSON 文件（文件名默认为当前时间）">导出</button>
     </div>
 
     <div class="split" id="split">
@@ -48,8 +46,7 @@
             <button class="mini-btn" data-action="copy-input" data-i18n="copy" data-i18n-title="copy_input_title" title="复制原始数据">复制</button>
           </span>
         </div>
-        <textarea id="jsonInput" class="editor" spellcheck="false" data-i18n-ph="placeholder" placeholder='在此粘贴 JSON，或点上方「导入」'></textarea>
-        <input id="fileInput" type="file" accept=".json,.jsonl,.txt,application/json" hidden />
+        <textarea id="jsonInput" class="editor" spellcheck="false" data-i18n-ph="placeholder" placeholder='在此粘贴 JSON，或拖拽文件到此处'></textarea>
       </div>
 
       <div class="resizer" id="resizer" data-i18n-title="resizer_title" title="拖动调整左右宽度"></div>
@@ -71,10 +68,19 @@
     </div>
   </div>
 
+  <!-- 拖放遮罩 -->
+  <div id="dropOverlay" class="drop-overlay" hidden>
+    <div class="drop-box">
+      <span class="drop-icon">📂</span>
+      <span class="drop-text" data-i18n="drop_hint">释放鼠标以导入 JSON 文件</span>
+    </div>
+  </div>
+
   <!-- 右键上下文菜单 -->
   <div id="ctxMenu" class="ctx-menu" role="menu" hidden>
     <button class="ctx-item" data-act="copy-sel" role="menuitem" data-i18n="ctx_copy">复制</button>
     <button class="ctx-item" data-act="paste" role="menuitem" data-i18n="ctx_paste">粘贴</button>
+    <button class="ctx-item" data-act="clear-input" role="menuitem" data-i18n="clear">清空</button>
   </div>
 
   <script src="i18n.js"></script>

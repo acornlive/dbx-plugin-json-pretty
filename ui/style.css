@@ -542,3 +542,38 @@ body.resizing .resizer::after { background: var(--primary); }
 
 /* 列宽由 app.js 的 applyLayout() 写成内联样式（工作区可收起，列数会变），
    这里不再用媒体查询固定列数，否则会与内联样式互相打架。 */
+
+/* ---------- 拖放遮罩 ---------- */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg, #f5f6f8) 60%, transparent);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.drop-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 48px 64px;
+  border: 3px dashed var(--primary, #6d5dfc);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--primary, #6d5dfc) 8%, var(--panel-bg, #fff));
+}
+
+.drop-icon {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.drop-text {
+  font-size: 16px;
+  color: var(--text, #2b2f38);
+  font-weight: 500;
+}
