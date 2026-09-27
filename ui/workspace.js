@@ -43,7 +43,7 @@
     activeId: '',
     expanded: {},
     prefs: {},
-    collapsed: false,
+    collapsed: true,
     saveEnabled: false   // 默认「用完即走」，不落盘；用户在工作区标题栏勾「保存」才开启
   };
 
@@ -118,7 +118,7 @@
     }).then(function (r) {
       applyTree((r && r.tree) || {});
       state.prefs = (r && r.prefs) || {};
-      state.collapsed = state.prefs.treeCollapsed === true;
+      state.collapsed = 'treeCollapsed' in state.prefs ? state.prefs.treeCollapsed === true : true;
       state.saveEnabled = state.prefs.saveEnabled === true;
       state.ready = true;
       // 启动既不载入内容，也就【没有】当前文件。
@@ -388,6 +388,7 @@
     state.activeId = node.id;
     render();
     rpc('jp/setActive', { id: node.id }).catch(function () { /* 忽略 */ });
+    JP.showLoading();
 
     var sz = node.size || 0;
     if (sz > READ_LIMIT) {
@@ -405,6 +406,7 @@
       rpc('jp/readFile', { id: node.id, maxBytes: READ_LIMIT }).then(function (fr) {
         onOpen(node, (fr && fr.content) || '');
       }).catch(function (e) {
+        JP.hideLoading();
         JP.notify(JP.t('ws_read_fail', errText(e)));
       });
     }

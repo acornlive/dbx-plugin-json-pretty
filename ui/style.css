@@ -577,3 +577,45 @@ body.resizing .resizer::after { background: var(--primary); }
   color: var(--text, #2b2f38);
   font-weight: 500;
 }
+
+/* ---------- 加载遮罩 ---------- */
+.load-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg, #f5f6f8) 50%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.load-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 36px 48px;
+  border-radius: 12px;
+  background: var(--panel-bg, #fff);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+.load-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border, #e3e6ec);
+  border-top-color: var(--primary, #6d5dfc);
+  border-radius: 50%;
+  animation: jp-spin 0.7s linear infinite;
+}
+
+@keyframes jp-spin {
+  to { transform: rotate(360deg); }
+}
+
+.load-text {
+  font-size: 14px;
+  color: var(--text-soft, #646a79);
+}

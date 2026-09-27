@@ -128,4 +128,23 @@
     }
     return text.length;
   };
+
+  /* ---------- 加载遮罩 ---------- */
+  JP.showLoading = function (msg) {
+    var el = JP.$('jpLoadOverlay');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'jpLoadOverlay';
+      el.className = 'load-overlay';
+      el.innerHTML = '<div class="load-box"><span class="load-spinner"></span><span class="load-text"></span></div>';
+      document.body.appendChild(el);
+    }
+    el.querySelector('.load-text').textContent = msg || JP.t('loading');
+    el.hidden = false;
+  };
+
+  JP.hideLoading = function () {
+    var el = JP.$('jpLoadOverlay');
+    if (el) el.hidden = true;
+  };
 })();

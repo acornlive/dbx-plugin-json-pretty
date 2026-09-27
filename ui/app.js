@@ -174,6 +174,8 @@
     var nodeId = '';
     var offset = 0;
 
+    JP.showLoading();
+
     // 1) 创建工作区节点
     return JPWS.invoke('jp/createNode', {
       type: 'file',
@@ -216,6 +218,7 @@
       var content = contentParts.join('');
       return JPWS.finishChunkedImport(nodeId, name, content);
     }).catch(function (e) {
+      JP.hideLoading();
       if (nodeId) {
         JPWS.invoke('jp/deleteNode', { id: nodeId }).catch(function () {});
       }
@@ -444,12 +447,14 @@
 
   function readFileInto(file) {
     if (!file) return;
+    JP.showLoading();
     var reader = new FileReader();
     reader.onload = function () {
       var content = String(reader.result == null ? '' : reader.result);
       loadFromFile(file.name, content);
     };
     reader.onerror = function () {
+      JP.hideLoading();
       JP.notify(t('file_read_fail', (reader.error && reader.error.message) || 'unknown'));
     };
     reader.readAsText(file);
@@ -562,8 +567,12 @@
     var newPos = start + text.length;
     jsonInput.setSelectionRange(newPos, newPos);
     dirty = true;
-    scheduleRender();
+    updateCounter();   // 立即更新计数，input 事件里也会调一次（幂等）
+    scheduleAuto();    // 触发格式化
+    scheduleSave();
     jsonInput.focus();
+    // 大内容粘贴时显示 loading，等格式化完成后自动关闭
+    if (text.length > 200000) JP.showLoading();
   }
 
   /* ============================================================
@@ -747,7 +756,7 @@
    */
   function doFormat(manual, announce, data) {
     var raw = jsonInput.value.trim();
-    if (!raw) { clearAll(); return; }
+    if (!raw) { clearAll(); JP.hideLoading(); return; }
 
     var d = data;
     if (d === undefined) {
@@ -758,24 +767,29 @@
         state.outputText = '';
         View.setPlain(t('json_err', e.message), true);
         if (manual) JP.notify(t('json_err', e.message));
+        JP.hideLoading();
         return;
       }
     }
 
-    state.outputText = losslessStringify(d, 2);
-    state.stats = Model.collectStats(d);
-    state.root = Model.createNode(d, null);
-    renderLevelButtons();
+    try {
+      state.outputText = losslessStringify(d, 2);
+      state.stats = Model.collectStats(d);
+      state.root = Model.createNode(d, null);
+      renderLevelButtons();
 
-    var lv = levelForRows(state.stats, TARGET_ROWS);
-    applyLevel(lv, true);
+      var lv = levelForRows(state.stats, TARGET_ROWS);
+      applyLevel(lv, true);
 
-    if (manual) {
-      syncInputPretty(state.outputText);
-      JP.notify(t('formatted'));
-    }
-    if (announce && lv !== FULL_EXPAND) {
-      JP.notify(t('big_auto', JP.fmtNum(state.stats.nodes), lv));
+      if (manual) {
+        syncInputPretty(state.outputText);
+        JP.notify(t('formatted'));
+      }
+      if (announce && lv !== FULL_EXPAND) {
+        JP.notify(t('big_auto', JP.fmtNum(state.stats.nodes), lv));
+      }
+    } finally {
+      JP.hideLoading();
     }
   }
 
@@ -855,6 +869,7 @@
     state.outputText = '';
     View.clear();
     if (levelButtonsEl) levelButtonsEl.innerHTML = '';
+    JP.hideLoading();
   }
 
   /* ============================================================
@@ -1125,6 +1140,7 @@
           state.autoOff = true;
           JP.notify(t('auto_off', JP.fmtNum(AUTO_LIMIT)));
         }
+        JP.hideLoading();
         return;
       }
       state.autoOff = false;

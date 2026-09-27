@@ -41,7 +41,7 @@
       copy: '复制',
       copy_input_title: '复制原始数据',
       copy_output_title: '复制结果全部内容',
-      placeholder: '在此粘贴 JSON，或点上方「导入」',
+      placeholder: '在此粘贴 JSON，或拖拽文件到此处',
       resizer_title: '拖动调整左右宽度',
       result: '结果',
       expand_label: '展开',
@@ -81,7 +81,7 @@
       ws_title: '工作区',
       ws_expand_title: '展开工作区',
       ws_save: '保存',
-      ws_save_title: '开启后：导入或粘贴的 JSON 会自动保存到工作区；关闭则用完即走，不落盘',
+      ws_save_title: '开启后：拖拽或粘贴的 JSON 会自动保存到工作区；关闭则用完即走，不落盘',
       ws_new_file: '＋文件',
       ws_new_file_title: '新建 JSON 文件',
       ws_new_folder: '＋目录',
@@ -113,7 +113,8 @@
       lvl_title: '展开到第 {0} 层',
       lvl_all_title: '展开全部层级',
       lvl_all: '全部',
-      lvl_n: '{0} 级'
+      lvl_n: '{0} 级',
+      loading: '处理中…'
     },
     en: {
       compress: 'Compress',
@@ -134,7 +135,7 @@
       copy: 'Copy',
       copy_input_title: 'Copy raw data',
       copy_output_title: 'Copy all result',
-      placeholder: 'Paste JSON here, or click "Import" above',
+      placeholder: 'Paste JSON here, or drag files in',
       resizer_title: 'Drag to resize left/right',
       result: 'Result',
       expand_label: 'Expand',
@@ -175,7 +176,7 @@
       ws_title: 'Workspace',
       ws_expand_title: 'Expand the workspace',
       ws_save: 'Save',
-      ws_save_title: 'On: imported or pasted JSON is saved to the workspace. Off: nothing is persisted',
+      ws_save_title: 'On: dragged or pasted JSON is saved to the workspace. Off: nothing is persisted',
       ws_new_file: '＋File',
       ws_new_file_title: 'New JSON file',
       ws_new_folder: '＋Folder',
@@ -207,7 +208,8 @@
       lvl_title: 'Expand to level {0}',
       lvl_all_title: 'Expand all levels',
       lvl_all: 'All',
-      lvl_n: 'Lv {0}'
+      lvl_n: 'Lv {0}',
+      loading: 'Processing…'
     }
   };
 
