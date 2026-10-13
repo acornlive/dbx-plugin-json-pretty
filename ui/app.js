@@ -1307,14 +1307,12 @@
     if (cs) cs.classList.toggle('is-on', searchState.cs);
   }
 
-  // 参与搜索的「值」文本：与右侧行里显示的取值保持一致（大整数去掉 JPBIG_ 前缀）。
-  // 容器没有值，返回 null。
-  function valueText(v) {
-    if (v === null) return 'null';
-    var t = typeof v;
-    if (t === 'object') return null;
-    if (t === 'string') return v.indexOf('JPBIG_') === 0 ? v.slice(6) : v;
-    return String(v);
+  // 参与搜索的文本必须与右侧行里看到的完全一致，否则会出现「数出来 3 个、只染 2 块」。
+  // 所以值的取用 Model.leafText、key 的取用 Model.keyText —— 行渲染走的也是这两个函数。
+  // 超长值与行渲染同口径：那里只整格标一次，这里也就只算一个命中。
+  function hitCount(m, txt) {
+    if (txt === null || txt === undefined || !txt) return 0;
+    return txt.length > Model.HIGHLIGHT_LIMIT ? (m.test(txt) ? 1 : 0) : m.count(txt);
   }
 
   // 遍历整份数据收集「key 或 value 命中」的行。
@@ -1349,11 +1347,16 @@
 
       var isCont = (cv !== null && typeof cv === 'object');
 
+      /* 计数口径是「出现次数」而不是「行数」：一个值里出现三次就占三个序号，
+         ↑↓ 在这些命中之间逐个跳。每条记录因此要带上「是 key 还是 value、第几个」，
+         行内的编号顺序是 key 在前、value 在后（与屏幕上的左右顺序一致）。 */
       // 数组元素是匿名的，只有对象里的 key 才可能被搜到
-      var hitKey = top.isObj && m.test(String(k));
+      var keyN = top.isObj ? hitCount(m, Model.keyText(k)) : 0;
       // 容器没有取值，只有叶子节点参与值搜索
-      var hitVal = !isCont && m.test(valueText(cv));
-      if (hitKey || hitVal) out.push({ p: top, k: k });
+      var valN = isCont ? 0 : hitCount(m, Model.leafText(cv));
+
+      for (var a = 0; a < keyN; a++) out.push({ p: top, k: k, field: 'key', occ: a });
+      for (var b = 0; b < valN; b++) out.push({ p: top, k: k, field: 'value', occ: b });
 
       if (isCont) {
         visited++;
@@ -1459,7 +1462,9 @@
     var hits = [];
     if (m && state.root) {
       searchState.truncated = collectMatches(state.root.raw, m, hits);
-      searchState.matches = hits.map(function (it) { return { path: pathOf(it) }; });
+      searchState.matches = hits.map(function (it) {
+        return { path: pathOf(it), field: it.field, occ: it.occ };
+      });
     } else {
       searchState.matches = [];
       searchState.truncated = false;
@@ -1479,8 +1484,15 @@
     var idx = revealPath(ms[i].path);
     if (idx < 0) { refreshMatches(); return; }
 
+    // 落在 value 上的命中，编号要排在这一行 key 的几个命中之后
+    var base = 0;
+    if (ms[i].field === 'value' && revealedNode &&
+        revealedNode.key !== null && revealedNode.key !== undefined) {
+      base = currentMatcher() ? hitCount(currentMatcher(), Model.keyText(revealedNode.key)) : 0;
+    }
+
     searchState.cur = i;
-    View.setCurrentRow(idx);
+    View.setCurrentRow(idx, ms[i].occ + base);
     View.scrollToIndex(idx);
     updateSearchCount();
   }

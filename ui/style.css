@@ -447,6 +447,12 @@ body.resizing .resizer::after { background: var(--primary); }
   color: inherit;
   border-radius: 2px;
 }
+/* ↑↓ 当前停下的那一处：整行已有淡底色，这里把具体位置挑出来 */
+.jv-mark.is-cur {
+  background: var(--primary);
+  color: #fff;
+  border-radius: 2px;
+}
 .jv-row.is-cur {
   background: color-mix(in srgb, var(--primary) 15%, transparent);
   box-shadow: inset 2px 0 0 var(--primary);

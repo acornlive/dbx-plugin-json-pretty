@@ -138,6 +138,25 @@
     return count;
   };
 
+  // 超过这个长度的值，行渲染不再逐个包 <mark>（只整格标一次），搜索计数也必须按 1 算，
+  // 否则「数出来 300 个、界面只有一格黄」。两边共用同一个阈值。
+  Model.HIGHLIGHT_LIMIT = 100000;
+
+  /* 一行里「值」的显示文本 —— 单一真源。
+     搜索计数、命中定位、行渲染三处必须共用这一份：它们各自推导过一次，
+     就会出现「计数那里数出来 3 个、屏幕上只染 2 块」这种两边对不上的情况。
+     接受 raw 值：无损大整数的 "JPBIG_xxx" 与 createNode 同口径，先剥前缀再输出。 */
+  Model.leafText = function (v) {
+    if (typeof v === 'string') {
+      return v.indexOf('JPBIG_') === 0 ? v.slice(6) : JSON.stringify(v);
+    }
+    if (v === null) return 'null';
+    return String(v);                          // number / boolean
+  };
+
+  // 一行里「key」的显示文本（同上，必须与 view 的 rowCells 一致）
+  Model.keyText = function (k) { return JSON.stringify(k); };
+
   Model.serialize = function (node) {
     try {
       var json = JSON.stringify(node.raw, null, 2);

@@ -63,17 +63,56 @@
       return ci ? s.toLowerCase().indexOf(m.src) >= 0 : s.indexOf(m.src) >= 0;
     };
 
-    // 把命中片段包进 <mark>；没命中返回 null，调用方回退到纯文本渲染
-    m.mark = function (s) {
+    /* 这段文本里有几个命中。搜索框显示的是「第几个 / 共几个」，↑↓ 就在这些命中之间跳，
+       所以计数必须与 mark() 包出来的块数一一对得上 —— 否则会出现「数 3 个、只染 1 块」
+       或者「数 1 个、块却有 3 个」这种对不上的情况。 */
+    m.count = function (s) {
+      if (s === null || s === undefined) return 0;
       s = String(s);
-      var wrap = function (t) { return '<mark class="jv-mark">' + JP.escapeHtml(t) + '</mark>'; };
-
       if (!m.re) {
-        var i = ci ? s.toLowerCase().indexOf(m.src) : s.indexOf(m.src);
-        if (i < 0) return null;
-        return JP.escapeHtml(s.slice(0, i)) +
-          wrap(s.substr(i, m.src.length)) +
-          JP.escapeHtml(s.slice(i + m.src.length));
+        var hayT = ci ? s.toLowerCase() : s;
+        var cnt = 0, pos = 0;
+        while ((pos = hayT.indexOf(m.src, pos)) >= 0) { cnt++; pos += m.src.length; }
+        return cnt;
+      }
+      var reC = m.re, n = 0, mtC;
+      reC.lastIndex = 0;
+      while ((mtC = reC.exec(s)) !== null) {
+        if (mtC[0] === '') {                 // 零宽匹配：手动前进一格，否则死循环
+          if (mtC.index >= s.length) break;
+          reC.lastIndex++;
+          continue;
+        }
+        n++;
+      }
+      reC.lastIndex = 0;
+      return n;
+    };
+
+    /* 把命中片段逐个包进 <mark>；没命中返回 null，调用方回退到纯文本渲染。
+       cur >= 0 时，第 cur 个（本次调用内的序号）额外加 .is-cur —— 那是 ↑↓ 当前停的那个。
+       走过的每一处都要包，不能只包第一处，否则「一行里明明有三处，界面只染一块」。 */
+    m.mark = function (s, cur) {
+      s = String(s);
+      var seq = 0;
+      var wrap = function (t) {
+        var cls = 'jv-mark' + (seq === cur ? ' is-cur' : '');
+        seq++;
+        return '<mark class="' + cls + '">' + JP.escapeHtml(t) + '</mark>';
+      };
+
+      // 非正则：要包下**所有**出现，不能只包第一处 —— 否则「一行里明明有三处命中，
+      // 界面只染了一块」，看起来就像漏匹配
+      if (!m.re) {
+        var hay = ci ? s.toLowerCase() : s;
+        var outT = '', lastT = 0, at, hitT = false;
+        while ((at = hay.indexOf(m.src, lastT)) >= 0) {
+          hitT = true;
+          outT += JP.escapeHtml(s.slice(lastT, at)) + wrap(s.substr(at, m.src.length));
+          lastT = at + m.src.length;
+        }
+        if (!hitT) return null;
+        return outT + JP.escapeHtml(s.slice(lastT));
       }
 
       var re = m.re;

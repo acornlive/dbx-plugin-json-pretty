@@ -17,7 +17,7 @@
   var OVERSCAN = 8;     // 视口上下额外渲染行数
   var MIN_USABLE = 60;  // 缩进再深也给它留出这么多宽度算换行
   var RELAYOUT_FIX_MAX = 4;   // 实测高度校正布局的最大次数（估算抖动时兜底，避免反复重排）
-  var HIGHLIGHT_LIMIT = 100000; // 超过这个长度的值不再逐段包 <mark>（见 paintCell）
+
 
   var host, canvasEl, rowsEl, plainEl;
   var rows = [];
@@ -37,7 +37,8 @@
   var measuring = false;
 
   var matcher = null;   // 搜索匹配器（JP.makeMatcher 的产物），null = 不搜索
-  var curIdx = -1;      // 当前搜索命中所在的下标，整行加 .is-cur
+  var curIdx = -1;      // 当前命中所在的行下标，整行加 .is-cur
+  var curOcc = -1;      // 当前命中在这一行里的第几个（key 的若干个 + value 的若干个，按显示顺序连续编号）
   var lnW = 0;          // 行号槽宽度（px）
 
   /* ---------- 初始化 ---------- */
@@ -173,9 +174,12 @@
     render();
   };
 
-  // 当前命中行（-1 表示没有）
-  V.setCurrentRow = function (i) {
+  /* 当前命中：第 i 行、这一行里的第 occ 个（-1 = 没有）。
+     计数口径是「出现次数」而不是「行数」：一个值里出现三次就占三个序号，
+     所以这里必须精确到那一个 <mark>，否则 ↑↓ 连按会像没反应。 */
+  V.setCurrentRow = function (i, occ) {
     curIdx = (typeof i === 'number' && i >= 0) ? i : -1;
+    curOcc = (curIdx >= 0 && typeof occ === 'number' && occ >= 0) ? occ : -1;
     lastStart = lastCount = -1;
     render();
   };
@@ -216,6 +220,7 @@
     rows = [];
     mode = 'none';
     curIdx = -1;
+    curOcc = -1;
     yOff = lnArr = null;
     canvasEl.hidden = true;
     plainEl.hidden = true;
@@ -366,13 +371,8 @@
   function hasKeyOf(n) { return !(n.key === null || n.key === undefined); }
 
   // 值整段渲染，不再截到定长加省略号：超长文本交给行内换行展示，双击复制仍拿到完整值
-  function leafText(n) {
-    var v = n.value;
-    if (n.kind === 'string') return JSON.stringify(v);
-    if (n.kind === 'number' || n.kind === 'boolean') return String(v);
-    if (n.kind === 'null') return 'null';
-    return String(v);
-  }
+  // 文本规则放 Model.leafText（搜索那边要按同一份文本计数），这里只做转发
+  function leafText(n) { return Model.leafText(n.raw); }
 
   /* 一行的各段文本：抽成纯计算，布局（换行算行数）与渲染共用同一份结果，
      否则两边算法一旦漂移，就会出现「按两行算的高度里塞一行、位置错半行」。 */
@@ -420,12 +420,21 @@
 
   function applyRow(el, e, c) {
     var n = e.node;
+    var idx = el.__i;
+
+    /* 命中是按「出现次数」编号的，一行里 key 的若干 + value 的若干连着排。
+       value 那边要把自己的序号减去 key 占掉的几个，才是它内部第几个 <mark>。 */
+    var cur = (idx === curIdx) ? curOcc : -1;
+    var keyCnt = (c.kt && matcher)
+      ? (c.kt.length > Model.HIGHLIGHT_LIMIT ? (matcher.test(c.kt) ? 1 : 0) : matcher.count(c.kt))
+      : 0;
+    var occBase = keyCnt;
 
     el.__fold.textContent = c.ftxt;
     el.__fold.className = c.fcls;
     // key：这一行到底有没有渲染 key 只看 kt。容器收尾行（「}」）和「加载更多」行的 kt 是空的，
     // 但节点本身仍有 key —— 绝不能拿 node.key 往这一行里写，否则会把整个 key 画到「}」后面
-    paintCell(el.__key, c.kt, c.hk ? String(n.key) : null);
+    paintCell(el.__key, c.kt, c.hk ? String(n.key) : null, cur);
 
     el.__punct.textContent = c.pt;
     // value：类名要先落，paintCell 可能再往上叠 is-hit。
@@ -434,11 +443,10 @@
     el.__val.className = 'jv-val ' + c.vcls;
     el.__val.title = c.vtitle || '';        // 只有「加载更多」行带提示
     if (c.container) el.__val.textContent = c.vt;
-    else paintCell(el.__val, c.vt, rawValueOf(n));
+    else paintCell(el.__val, c.vt, rawValueOf(n), cur < 0 ? -1 : cur - occBase);
     el.__tail.textContent = c.tt;
     el.__tail.className = 'jv-tail' + (c.tt ? ' s-punct' : '');
 
-    var idx = el.__i;
     el.__ln.textContent = String(idx + 1);
     el.classList.toggle('is-cur', idx === curIdx);
     el.style.paddingLeft = (lnW + e.depth * INDENT) + 'px';
@@ -456,26 +464,28 @@
      染色一律按 disp 的位置来：值是 JSON 字符串时，disp 里的引号已被 JSON.stringify
      转义成 \" ，跟原文已经不是同一串字符 —— 这时拿原文定位找不到精确落点，老代码就退化成
      「原文命中 → 整段加底色」，于是一整串 JSON 全黄，反而看不见命中的是哪几个字。
-     搜索词本身几乎不会被转义，所以直接在 disp 上找，命中范围天然就是那几个字符。 */
-  function paintCell(span, disp, raw) {
+     搜索词本身几乎不会被转义，所以直接在 disp 上找，命中范围天然就是那几个字符。
+     cur：这一格里第几个 <mark> 是「当前命中」（< 0 表示没有），给它单独加 .is-cur。 */
+  function paintCell(span, disp, raw, cur) {
     span.classList.remove('is-hit');
     if (!disp) { span.textContent = ''; return; }
     if (!matcher) { span.textContent = disp; return; }
 
-    if (disp.length > HIGHLIGHT_LIMIT) {
+    if (disp.length > Model.HIGHLIGHT_LIMIT) {
       // 极长值：整段 escape + 逐个包裹的代价远大于收益，只标「这一格命中了」
       if (raw != null && matcher.test(String(raw))) span.classList.add('is-hit');
       span.textContent = disp;
       return;
     }
 
-    var html = matcher.mark(disp);
+    var html = matcher.mark(disp, cur);
     if (html !== null) { span.innerHTML = html; return; }
 
     // disp 上找不到：命中内容跨了 \" \n 这类转义序列（只有搜特殊字符才会遇到），
     // 没法精确定位到哪几个字，退一步整段标记，至少「计数说命中，界面也有痕迹」
     if (raw != null && matcher.test(String(raw))) {
-      span.innerHTML = '<mark class="jv-mark">' + JP.escapeHtml(disp) + '</mark>';
+      span.innerHTML = '<mark class="jv-mark' + (cur === 0 ? ' is-cur' : '') + '">' +
+        JP.escapeHtml(disp) + '</mark>';
       return;
     }
     span.textContent = disp;
