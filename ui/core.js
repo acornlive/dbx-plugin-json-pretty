@@ -39,6 +39,64 @@
       .replace(/"/g, '&quot;');
   };
 
+  /* ---------- 搜索匹配器（key 与 value 共用的一份实现） ----------
+     app.js 用它判断「整棵数据里哪些行命中」，view.js 用它给可见行的文本上色，
+     两边必须同源，否则会出现「计数说命中了但没高亮」。
+     make(term, regex, ci) -> { test(s), mark(s) } | null（term 为空或正则非法） */
+  JP.makeMatcher = function (term, regex, ci) {
+    if (!term) return null;
+
+    var m = { re: null, src: '', ci: !!ci };
+    if (regex) {
+      try { m.re = new RegExp(term, ci ? 'gi' : 'g'); }
+      catch (e) { return null; }          // 正则还没写完/写错
+      m.src = term;
+    } else {
+      m.src = ci ? term.toLowerCase() : term;
+    }
+
+    // 该文本是否命中
+    m.test = function (s) {
+      if (s === null || s === undefined) return false;
+      s = String(s);
+      if (m.re) { m.re.lastIndex = 0; return m.re.test(s); }
+      return ci ? s.toLowerCase().indexOf(m.src) >= 0 : s.indexOf(m.src) >= 0;
+    };
+
+    // 把命中片段包进 <mark>；没命中返回 null，调用方回退到纯文本渲染
+    m.mark = function (s) {
+      s = String(s);
+      var wrap = function (t) { return '<mark class="jv-mark">' + JP.escapeHtml(t) + '</mark>'; };
+
+      if (!m.re) {
+        var i = ci ? s.toLowerCase().indexOf(m.src) : s.indexOf(m.src);
+        if (i < 0) return null;
+        return JP.escapeHtml(s.slice(0, i)) +
+          wrap(s.substr(i, m.src.length)) +
+          JP.escapeHtml(s.slice(i + m.src.length));
+      }
+
+      var re = m.re;
+      re.lastIndex = 0;
+      var out = '', last = 0, hit = false, mt;
+      while ((mt = re.exec(s)) !== null) {
+        if (mt[0] === '') {                 // 零宽匹配：手动前进一格，否则死循环
+          if (mt.index >= s.length) break;
+          re.lastIndex++;
+          continue;
+        }
+        hit = true;
+        out += JP.escapeHtml(s.slice(last, mt.index)) + wrap(mt[0]);
+        last = mt.index + mt[0].length;
+      }
+      re.lastIndex = 0;
+      if (!hit) return null;
+      return out + JP.escapeHtml(s.slice(last));
+    };
+
+    return m;
+  };
+
   // 反馈统一走宿主通知；宿主不支持时静默
   JP.notify = function (msg) {
     if (!msg) return;

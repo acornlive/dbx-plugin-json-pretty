@@ -23,7 +23,9 @@
   var AUTO_LIMIT = 400000;      // 超过该字符数暂停自动格式化，改由点「格式化」触发
   var PLAIN_LIMIT = 200000;     // 纯文本模式显示上限（复制仍为完整内容）
   var TARGET_ROWS = 30000;      // 首次渲染的目标行数
-  var HARD_ROWS = 200000;       // 「全部展开」的行数上限
+  // 「全部展开」的行数上限：300k 行的虚拟列表实测 ~110ms 建成、内存与画图都可控，
+  // 主要约束是行容器总高度（行数 × 22px）不能逼近浏览器的元素高度上限（Chrome 约 3350 万 px）
+  var HARD_ROWS = 400000;
   var MAX_LEVEL_BUTTONS = 10;
 
   /* ---------- 无损大整数处理 ---------- */
@@ -48,6 +50,7 @@
   /* ---------- 状态 ---------- */
   var state = {
     root: null,        // 当前 JSON 层级树根节点（子节点懒构建）
+    data: null,        // 当前口径的整份数据（嵌套解析开关来回切要用）
     outputText: '',    // 完整格式化文本（用于复制，不随折叠变化）
     stats: null,       // { depth, keys, items, nodes, byDepth, truncated }
     autoOff: false     // 是否已因内容过大暂停自动格式化
@@ -58,6 +61,10 @@
   var jvCanvas, jvRows, jvPlain;
   var treePane, treeList, resizerTree;
   var wsToggleBtn, wsStateIcon, wsSaveToggle;
+  var searchBox, searchInput, searchCount, searchClear;
+  var deepParseToggle;
+  var rowCopyBtn = null, hoverRow = null;   // 行 hover 浮动复制按钮（全局只有一个实例）
+  var selecting = false;                    // 鼠标按下拖选中：期间不出按钮
   var timer = null;
   var saveTimer = null;
   var ctxTarget = null;
@@ -75,10 +82,12 @@
   function boot() {
     cacheEls();
     applyI18n();
+    Model.parseText = losslessParse;   // 模型层做嵌套解析时用同一套无损解析（保住大整数）
     View.init({ host: jsonOutput, canvas: jvCanvas, rows: jvRows, plain: jvPlain });
     View.onToggle = onToggle;
     View.onMore = onMore;
     bindUI();
+    bindSearch();
     initSplitter();
     bindTheme();
     bindLocale();
@@ -265,6 +274,8 @@
     dirty = false;
     saveWarned = false;
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    // 嵌套解析是「这一个文件我想这么看」的临时口径，不该被下一个文件继承 —— 切文件一律拨回关闭
+    setDeepParse(false);
     jsonInput.value = content || '';
     updateCounter();
     if (jsonInput.value.trim()) doFormat(false, false);
@@ -288,6 +299,11 @@
     wsToggleBtn = $('wsToggleBtn');
     wsStateIcon = $('wsStateIcon');
     wsSaveToggle = $('wsSaveToggle');
+    searchBox = $('searchBox');
+    searchInput = $('searchInput');
+    searchCount = $('searchCount');
+    searchClear = $('searchClear');
+    deepParseToggle = $('deepParseToggle');
   }
 
   if (dbx && dbx.ready && typeof dbx.ready.then === 'function') {
@@ -363,21 +379,78 @@
       if (ACTIONS[btn.dataset.action]) ACTIONS[btn.dataset.action]();
     });
 
-    // 双击复制：优先复制选中的文本；无选中则复制双击所在行的 JSON 值
-    jsonOutput.addEventListener('dblclick', function (e) {
-      var sel = window.getSelection && window.getSelection();
-      var text = (sel && !sel.isCollapsed) ? sel.toString() : '';
-      if (!text) {
-        var rowEl = e.target.closest ? e.target.closest('.jv-row') : null;
-        var entry = rowEl ? View.entryAt(rowEl.__i) : null;
-        if (!entry) { JP.notify(t('sel_or_dbl')); return; }
-        text = Model.serialize(entry.node);
+
+    /* ---------- 行 hover 浮动复制按钮 ----------
+       按钮挂进 hover 的那一行 DOM（.jv-row 自带 position: relative），left 由行的
+       padding-left 推出，所以滚动 / 软换行 / 层级缩进都不用自己算坐标。
+       代价：行 DOM 是虚拟滚动池化复用的，同一份 DOM 换个 __i 就代表另一条数据了 ——
+       所以窗口一重排（View.onRender）或鼠标离开，必须立刻把按钮摘下来。 */
+    jsonOutput.addEventListener('mousemove', function (e) {
+      if (selecting) {
+        // 正在拖着框选文本：不打扰。e.buttons 已归零说明是在窗口外松的手（收不到 mouseup），自愈
+        if (e.buttons) return;
+        selecting = false;
       }
+      // 悬在按钮自己身上时，closest 命中的还是它所在的那一行
+      var row = e.target.closest ? e.target.closest('.jv-row') : null;
+      if (!row) { hideRowCopy(); return; }
+      if (row === hoverRow) return;          // 同一行里移动只算一次
+      hoverRow = row;
+      showRowCopy(row);
+    });
+    jsonOutput.addEventListener('mouseleave', hideRowCopy);
+    jsonOutput.addEventListener('mousedown', function (e) {
+      // 按在按钮上不能把它摘掉：元素一离开 DOM，mouseup 就凑不出 click，复制永远不执行
+      if (rowCopyBtn && rowCopyBtn.contains(e.target)) return;
+      selecting = true;
+      hideRowCopy();
+    });
+    window.addEventListener('mouseup', function () { selecting = false; });
+    View.onRender = hideRowCopy;
+
+    function ensureRowCopyBtn() {
+      if (rowCopyBtn) return rowCopyBtn;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'row-copy';
+      btn.tabIndex = -1;                                 // 不抢 Tab 焦点
+      btn.setAttribute('data-i18n-title', 'row_copy');   // 切换语言时 applyI18n 会统一重刷 title
+      btn.setAttribute('title', t('row_copy'));
+      btn.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">'
+        + '<path d="M5.6 2.6h7.2v8.6H5.6z" fill="none" stroke="currentColor" stroke-width="1.2"/>'
+        + '<path d="M10.4 13.4H2.8V5.8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();     // 别冒泡到行的折叠 / 展开委托上去
+        doCopyRow(hoverRow);
+      });
+      rowCopyBtn = btn;
+      return btn;
+    }
+
+    function doCopyRow(row) {
+      var entry = row ? View.entryAt(row.__i) : null;
+      var text = entry ? (Model.rowCopyText(entry) || '') : '';
       if (!text) return;
       JP.copyText(text)
-        .then(function () { JP.notify(t('copied_sel')); })
+        .then(function () { JP.notify(t('copied_row')); })
         .catch(function () { JP.notify(t('copy_fail_manual')); });
-    });
+    }
+
+    function showRowCopy(row) {
+      var entry = View.entryAt(row.__i);
+      if (!Model.rowCopyable(entry)) return;      // 收口行 } ] 和「还有 N 项」不给按钮
+      var btn = ensureRowCopyBtn();
+      // 内容起点 = 行的 padding-left（行号槽 + 层级缩进），按钮贴在它左边：17 宽 + 2 间隙
+      var indent = parseFloat(row.style.paddingLeft) || 0;
+      btn.style.left = Math.max(0, indent - 19) + 'px';
+      if (btn.parentNode !== row) row.appendChild(btn);
+    }
+
+    function hideRowCopy() {
+      hoverRow = null;
+      if (rowCopyBtn && rowCopyBtn.parentNode) rowCopyBtn.parentNode.removeChild(rowCopyBtn);
+    }
 
     // 「保存」开关：默认关闭（用完即走）。开启后导入 / 粘贴的内容都会落盘。
     if (wsSaveToggle) {
@@ -385,6 +458,13 @@
         JPWS.setSaveEnabled(wsSaveToggle.checked);
         // 刚开启：把编辑区里已有的内容也存下来，让开关立刻生效而不是等下次输入
         if (wsSaveToggle.checked) { dirty = true; scheduleSave(); }
+      });
+    }
+
+    // 「嵌套解析」开关：结果区里形如 "{\"a\":1}" 的字符串值递归展开成可折叠的树
+    if (deepParseToggle) {
+      deepParseToggle.addEventListener('change', function () {
+        toggleDeepParse(deepParseToggle.checked);
       });
     }
 
@@ -434,8 +514,9 @@
       state.root = null;
       state.stats = null;
       state.outputText = '';
-      View.setPlain(t('json_err', e.message), true);
+      View.setPlain(jsonErrorReport(content, e.message), true);
       JP.notify(t('loaded_err', name, e.message));
+      refreshMatches();
       return;
     }
     doFormat(false, true, data);
@@ -765,14 +846,26 @@
         state.root = null;
         state.stats = null;
         state.outputText = '';
-        View.setPlain(t('json_err', e.message), true);
-        if (manual) JP.notify(t('json_err', e.message));
+        // 用编辑区里的原始文本算出错位置（带上前后几行和 ^ 标记）
+        var rep = jsonErrorReport(jsonInput.value, e.message);
+        View.setPlain(rep, true);
+        if (manual) {
+          JP.notify(rep.split('\n')[0]);
+          var at = scanJsonError(jsonInput.value);
+          if (at >= 0) focusErrorOffset(at);
+        }
+        refreshMatches();
         JP.hideLoading();
         return;
       }
     }
 
     try {
+      // 手动「格式化」要回填编辑区，回填的必须是原始口径的文本 —— 否则开了嵌套解析会把
+      // 编辑区里一坨 JSON 字符串悄悄改写成嵌套对象，语义就变了
+      var srcPretty = (manual && Model.deepParse) ? losslessStringify(d, 2) : null;
+      state.data = d;                                  // 原始口径：嵌套解析开关来回切换要用它
+      if (Model.deepParse) d = Model.deepResolve(d);   // 开着的：把值里的 JSON 字符串递归展开成真结构
       state.outputText = losslessStringify(d, 2);
       state.stats = Model.collectStats(d);
       state.root = Model.createNode(d, null);
@@ -782,12 +875,13 @@
       applyLevel(lv, true);
 
       if (manual) {
-        syncInputPretty(state.outputText);
+        syncInputPretty(srcPretty || state.outputText);
         JP.notify(t('formatted'));
       }
       if (announce && lv !== FULL_EXPAND) {
         JP.notify(t('big_auto', JP.fmtNum(state.stats.nodes), lv));
       }
+      refreshMatches();
     } finally {
       JP.hideLoading();
     }
@@ -840,11 +934,109 @@
       if (lv === FULL_EXPAND) JP.notify(t('expanded_all', state.stats ? state.stats.depth : 0));
       else JP.notify(t('expanded_to', lv));
     }
+    refreshMatches();
   }
 
   function rebuild() {
     if (!state.root) return;
     View.setTree(Model.flatten(state.root));
+    // 展开状态可能变了，把搜索命中的标记重新钉到它现在的那一行
+    if (revealedNode) View.setCurrentRow(View.indexOfNode(revealedNode));
+  }
+
+  /* ============================================================
+     嵌套解析开关：把 body / payload 这类「值是 JSON 文本的字符串」递归展开成树
+     ============================================================ */
+  // 只改开关状态与外观，不动数据 —— 打开另一个文件时用它拨回关闭
+  function setDeepParse(on) {
+    Model.deepParse = !!on;
+    if (deepParseToggle) deepParseToggle.checked = Model.deepParse;
+  }
+
+  function toggleDeepParse(on) {
+    setDeepParse(on);
+    // 还没格式化：状态先记着，下次格式化时自然生效
+    if (!state.root || !state.data) return;
+
+    JP.showLoading(t('deep_working'));
+    // 让 loading 先画出来再开工：大文件里要把全树的字符串逐个 JSON.parse
+    setTimeout(function () {
+      try {
+        if (Model.deepParse) Model.deepResolve(state.data);
+        else Model.deepRevert();
+        rebuildForDeep();
+      } finally {
+        JP.hideLoading();
+      }
+    }, 30);
+  }
+
+  // 同一份数据换了呈现口径：重建树与统计，但尽量保住用户手动展开的那些节点
+  function rebuildForDeep() {
+    var snap = snapshotExpansion();
+    state.outputText = losslessStringify(state.data, 2);
+    state.stats = Model.collectStats(state.data);
+    state.root = Model.createNode(state.data, null);
+    renderLevelButtons();
+
+    // 开了开关、内容又够小：和首次格式化一个口径，直接全展开。
+    // 不能只靠 restore —— 它贴回的是旧口径的展开状态，新解析出来的那几层在旧树里
+    // 根本不存在（那时还是一整个字符串），于是小 JSON「一键格式化是全展开的，
+    // 再开个嵌套解析反而折叠起来了」，很别扭。
+    // 大内容仍走 restore：保住用户原本的浏览位置，也避免一次铺开几十万行。
+    if (Model.deepParse && levelForRows(state.stats, TARGET_ROWS) === FULL_EXPAND) {
+      applyLevel(FULL_EXPAND, true);
+      revealedNode = null;          // 旧节点已经不在树里了
+      JP.notify(t('deep_on'));
+      return;
+    }
+
+    restoreExpansion(snap);
+    View.setTree(Model.flatten(state.root));
+    setActiveLevel(null);
+    revealedNode = null;          // 旧节点已经不在树里了
+    refreshMatches();
+    JP.notify(Model.deepParse ? t('deep_on') : t('deep_off'));
+  }
+
+  function childPath(parent, c, i) {
+    return parent + '\u0001' + ((c.key === null || c.key === undefined) ? i : c.key);
+  }
+
+  // 记下旧树里每个容器的展开状态与分页上限（只走已经建过子节点的子树）
+  function snapshotExpansion() {
+    var map = Object.create(null);
+    if (!state.root) return map;
+    var stack = [{ n: state.root, p: '' }];
+    while (stack.length) {
+      var it = stack.pop();
+      var n = it.n;
+      if (!Model.isContainer(n)) continue;
+      if (n.expanded || n.limit) map[it.p] = { expanded: !!n.expanded, limit: n.limit || 0 };
+      var ch = n.children;
+      if (!ch) continue;          // 懒加载：没建过子节点的子树本来就该是折叠的
+      for (var i = 0; i < ch.length; i++) stack.push({ n: ch[i], p: childPath(it.p, ch[i], i) });
+    }
+    return map;
+  }
+
+  // 按路径把展开状态贴回新树（路径 = key / 下标序列，同一种数据口径下是稳定的）
+  function restoreExpansion(map) {
+    if (!state.root) return;
+    var stack = [{ n: state.root, p: '' }];
+    while (stack.length) {
+      var it = stack.pop();
+      var n = it.n;
+      if (!Model.isContainer(n)) continue;
+      var s = map[it.p];
+      if (s) {
+        n.expanded = s.expanded;
+        if (s.limit) n.limit = s.limit;
+      }
+      if (!n.expanded) continue;
+      var ch = Model.ensureChildren(n, Model.childLimit(n));
+      for (var i = 0; i < ch.length; i++) stack.push({ n: ch[i], p: childPath(it.p, ch[i], i) });
+    }
   }
 
   // 点击折叠箭头
@@ -856,20 +1048,463 @@
     rebuild();
   }
 
-  // 点击「加载更多」：把该容器的子节点上限再翻一页
-  function onMore(e) {
+  // 点击「加载更多」：默认再翻一页；Shift 点击把该容器剩余子节点一次取完
+  // （十万个元素的数组，靠一页 500 要点两百次才翻到底）
+  function onMore(e, idx, shift) {
     var n = e.node;
-    n.limit = (n.limit || Model.PAGE) + Model.PAGE;
+    var next = shift ? n.size : (n.limit || Model.PAGE) + Model.PAGE;
+    n.limit = Math.min(next, n.size);
     rebuild();
   }
 
   function clearAll() {
     state.root = null;
     state.stats = null;
+    state.data = null;
     state.outputText = '';
     View.clear();
+    revealedNode = null;
     if (levelButtonsEl) levelButtonsEl.innerHTML = '';
     JP.hideLoading();
+  }
+
+  /* ============================================================
+     JSON 解析错误：给出行列位置和出错片段
+     ============================================================ */
+  // V8 新版的 JSON.parse 报错已不再带 "at position N"，而且 losslessParse 会把
+  // 大整数改写成字符串（字符下标整体右移）—— 所以位置一律靠自己扫一遍「原始输入」
+  // 来定位，保证和编辑区里看到的文本一一对齐。返回 -1 表示没扫出语法错误
+  // （例如嵌套过深抛出的是 RangeError，语法本身没问题）。
+  function scanJsonError(s) {
+    var i = 0;
+    var n = s.length;
+
+    function ws() {
+      while (i < n) {
+        var c = s.charCodeAt(i);
+        if (c === 32 || c === 9 || c === 10 || c === 13) i++;
+        else break;
+      }
+    }
+    function lit(word) {
+      if (s.slice(i, i + word.length) === word) { i += word.length; return true; }
+      return false;
+    }
+    function str() {                       // 进入时 s[i] === '"'
+      i++;
+      while (i < n) {
+        var c = s[i];
+        if (c === '\\') { i += 2; continue; }
+        if (c === '"') { i++; return -1; }
+        if (c === '\n' || c === '\r') return i;   // 字符串里不能直接换行
+        i++;
+      }
+      return i;                            // 引号没闭合
+    }
+    function num() {
+      if (s[i] === '-') i++;
+      if (i >= n) return i;
+      if (s[i] === '0') { i++; }
+      else if (s[i] >= '1' && s[i] <= '9') { while (i < n && s[i] >= '0' && s[i] <= '9') i++; }
+      else return i;
+      if (i < n && s[i] === '.') {
+        i++;
+        if (!(i < n && s[i] >= '0' && s[i] <= '9')) return i;
+        while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+      }
+      if (i < n && (s[i] === 'e' || s[i] === 'E')) {
+        i++;
+        if (i < n && (s[i] === '+' || s[i] === '-')) i++;
+        if (!(i < n && s[i] >= '0' && s[i] <= '9')) return i;
+        while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+      }
+      return -1;
+    }
+    function val(depth) {
+      if (depth > 1000) return -1;         // 太深不下判断，交给 JSON.parse 自己报错
+      ws();
+      if (i >= n) return i;
+      var c = s[i];
+
+      if (c === '{') {
+        i++;
+        ws();
+        if (i < n && s[i] === '}') { i++; return -1; }
+        for (;;) {
+          ws();
+          if (i >= n) return i;
+          if (s[i] !== '"') return i;       // key 必须是字符串
+          var bad = str();
+          if (bad >= 0) return bad;
+          ws();
+          if (i >= n) return i;
+          if (s[i] !== ':') return i;
+          i++;
+          bad = val(depth + 1);
+          if (bad >= 0) return bad;
+          ws();
+          if (i >= n) return i;
+          if (s[i] === ',') { i++; continue; }
+          if (s[i] === '}') { i++; return -1; }
+          return i;                         // 既不是 , 也不是 } —— 缺分隔符/多余内容
+        }
+      }
+
+      if (c === '[') {
+        i++;
+        ws();
+        if (i < n && s[i] === ']') { i++; return -1; }
+        for (;;) {
+          var bad2 = val(depth + 1);
+          if (bad2 >= 0) return bad2;
+          ws();
+          if (i >= n) return i;
+          if (s[i] === ',') { i++; continue; }
+          if (s[i] === ']') { i++; return -1; }
+          return i;
+        }
+      }
+
+      if (c === '"') return str();
+      if (c === '-' || (c >= '0' && c <= '9')) return num();
+      if (lit('true') || lit('false') || lit('null')) return -1;
+      return i;                             // 非法字符开头
+    }
+
+    var bad = val(0);
+    if (bad >= 0) return bad;
+    ws();
+    if (i < n) return i;                    // 后面还有多余内容
+    return -1;
+  }
+
+  // 字符下标 -> 行号列号（列从 1 开始）
+  function lineColOf(text, idx) {
+    var line = 1, lineStart = 0;
+    for (var i = 0; i < idx; i++) {
+      if (text.charCodeAt(i) === 10) { line++; lineStart = i + 1; }
+    }
+    return { line: line, col: idx - lineStart + 1 };
+  }
+
+  function padLeft(s, n) { while (String(s).length < n) s = ' ' + s; return String(s); }
+
+  // 出错位置 + 前后几行 + 指到列上的 ^ 标记
+  function jsonErrorReport(text, msg) {
+    var idx = scanJsonError(text);
+    if (idx < 0) return t('json_err', msg);
+
+    var lc = lineColOf(text, idx);
+    var lines = text.split('\n');
+    var li = Math.min(lines.length - 1, lc.line - 1);
+    var from = Math.max(0, li - 2);
+    var to = Math.min(lines.length - 1, li + 2);
+    var pad = String(to + 1).length;
+    var out = [t('json_err_at', lc.line, lc.col, msg), ''];
+
+    for (var i = from; i <= to; i++) {
+      var isErr = (i === li);
+      var line = lines[i];
+      var startCol = 0;
+
+      // 压缩成一行的 JSON 可能长达几十万字符，只显示出错点附近的一段
+      if (line.length > 200) {
+        if (isErr) startCol = Math.max(0, Math.min(line.length - 200, lc.col - 1 - 100));
+        line = (startCol > 0 ? '…' : '') + line.substr(startCol, 200) +
+          (line.length > startCol + 200 ? '…' : '');
+      }
+      out.push((isErr ? '> ' : '  ') + padLeft(i + 1, pad) + ' | ' + line);
+
+      if (isErr) {
+        var caretCol = lc.col - 1 - startCol + (startCol > 0 ? 1 : 0);
+        if (caretCol < 0) caretCol = 0;
+        var caret = '';
+        for (var c = 0; c < caretCol; c++) caret += ' ';
+        out.push('  ' + padLeft('', pad) + ' | ' + caret + '^ ' + t('json_err_here'));
+      }
+    }
+    return out.join('\n');
+  }
+
+  // 把出错的字符在编辑区里选中并滚动过去
+  function focusErrorOffset(offset) {
+    try {
+      jsonInput.focus();
+      var end = Math.min(offset + 1, jsonInput.value.length);
+      jsonInput.setSelectionRange(offset, end);
+    } catch (e) { /* 不支持就跳过 */ }
+  }
+
+  /* ============================================================
+     结果区搜索（按 key 名）
+     - 搜的是整份数据，折叠 / 未渲染出来的部分也算，命中就自动展开到那一级
+     - 命中顺序与右侧行顺序一致（先序遍历，出栈时记录），上下切换即视觉顺序
+     ============================================================ */
+  var MAX_SEARCH_MATCHES = 2000;   // 命中数上限，超出就停（超大文件不能卡住 UI）
+  var SEARCH_BUDGET = 200000;      // 单次遍历的容器数上限
+
+  var searchState = {
+    open: false, term: '', regex: false, cs: false,   // cs: 区分大小写
+    matches: [], cur: -1, truncated: false
+  };
+  var revealedNode = null;         // 当前命中对应的节点对象，重建平面行后据此重新定位
+  var srchTimer = null;
+
+  function toggleSearch() {
+    if (searchState.open) closeSearch();
+    else openSearch();
+  }
+
+  function openSearch() {
+    if (!searchBox) return;
+    searchState.open = true;
+    searchBox.hidden = false;
+    syncSearchToggles();
+    if (searchInput) { searchInput.focus(); searchInput.select(); }
+    syncSearchClear();
+    if (searchState.term) runSearch();
+    else updateSearchCount();
+  }
+
+  function closeSearch() {
+    if (!searchBox) return;
+    if (srchTimer) { clearTimeout(srchTimer); srchTimer = null; }
+    searchBox.hidden = true;
+    searchState.open = false;
+    searchState.term = '';
+    searchState.matches = [];
+    searchState.cur = -1;
+    searchState.truncated = false;
+    revealedNode = null;
+    View.setSearch(null);
+    View.setCurrentRow(-1);
+    if (searchInput) { searchInput.value = ''; searchInput.classList.remove('is-bad'); }
+    syncSearchClear();
+  }
+
+  // 输入框右侧的 × 只在有内容时出现
+  function syncSearchClear() {
+    if (searchClear) searchClear.hidden = !searchInput || !searchInput.value;
+  }
+
+  // × 清空：只清搜索词，搜索框本身保持打开（区别于右上角的 × 关闭整个搜索）
+  function clearSearchTerm() {
+    if (!searchInput) return;
+    if (srchTimer) { clearTimeout(srchTimer); srchTimer = null; }   // 撤掉排队中的那次搜索，否则旧词会立刻盖回来
+    searchInput.value = '';
+    searchInput.classList.remove('is-bad');
+    syncSearchClear();
+    runSearch();        // 空词会走「无匹配器」分支：清高亮 + 计数归零，不会弹提示
+    searchInput.focus();
+  }
+
+  // 正则 / 大小写开关的按下状态
+  function syncSearchToggles() {
+    if (!searchBox) return;
+    var re = searchBox.querySelector('[data-action="search-regex"]');
+    var cs = searchBox.querySelector('[data-action="search-case"]');
+    if (re) re.classList.toggle('is-on', searchState.regex);
+    if (cs) cs.classList.toggle('is-on', searchState.cs);
+  }
+
+  // 参与搜索的「值」文本：与右侧行里显示的取值保持一致（大整数去掉 JPBIG_ 前缀）。
+  // 容器没有值，返回 null。
+  function valueText(v) {
+    if (v === null) return 'null';
+    var t = typeof v;
+    if (t === 'object') return null;
+    if (t === 'string') return v.indexOf('JPBIG_') === 0 ? v.slice(6) : v;
+    return String(v);
+  }
+
+  // 遍历整份数据收集「key 或 value 命中」的行。
+  // 每个容器一条栈记录（带游标），子节点按「先记命中、再深入子树」的顺序处理，
+  // 于是命中顺序就是右上到右下的行顺序；路径用父指针串起来，避免层层 concat 新数组。
+  function collectMatches(rootRaw, m, out) {
+    var stack = [mkItem(rootRaw, null, null)];
+    var visited = 0, truncated = false;
+
+    function mkItem(v, p, k) {
+      var isArr = Array.isArray(v);
+      var isObj = !isArr && v !== null && typeof v === 'object';
+      return {
+        v: v, p: p, k: k,
+        isArr: isArr,
+        isObj: isObj,
+        keys: isObj ? Object.keys(v) : null,
+        i: 0
+      };
+    }
+
+    while (stack.length) {
+      if (out.length >= MAX_SEARCH_MATCHES || visited >= SEARCH_BUDGET) { truncated = true; break; }
+
+      var top = stack[stack.length - 1];
+      var cnt = top.isArr ? top.v.length : (top.keys ? top.keys.length : 0);
+      if (top.i >= cnt) { stack.pop(); continue; }      // 这个容器走完了，回到上一层
+
+      var j = top.i++;
+      var k = top.isArr ? j : top.keys[j];
+      var cv = top.v[k];
+
+      var isCont = (cv !== null && typeof cv === 'object');
+
+      // 数组元素是匿名的，只有对象里的 key 才可能被搜到
+      var hitKey = top.isObj && m.test(String(k));
+      // 容器没有取值，只有叶子节点参与值搜索
+      var hitVal = !isCont && m.test(valueText(cv));
+      if (hitKey || hitVal) out.push({ p: top, k: k });
+
+      if (isCont) {
+        visited++;
+        stack.push(mkItem(cv, top, k));
+      }
+    }
+    return truncated;
+  }
+
+  // 父指针链还原成「根 -> 目标」的路径
+  function pathOf(item) {
+    var arr = [];
+    var c = item;
+    while (c && c.k !== null && c.k !== undefined) { arr.push(c.k); c = c.p; }
+    return arr.reverse();
+  }
+
+  // 沿路径逐级展开（必要时抬高分页上限），返回目标 key 所在的行下标；失败 -1
+  function revealPath(path) {
+    if (!state.root || !path) return -1;
+    var node = state.root;
+    for (var i = 0; i < path.length; i++) {
+      if (!Model.isContainer(node)) return -1;
+
+      var idx;
+      if (node.kind === 'array') {
+        idx = (typeof path[i] === 'number') ? path[i] : parseInt(path[i], 10);
+      } else {
+        if (!node.keys) node.keys = Object.keys(node.raw);
+        idx = node.keys.indexOf(String(path[i]));
+      }
+      if (!(idx >= 0) || idx >= node.size) return -1;
+
+      // 目标可能落在分页之外，或者整个容器还折叠着
+      var need = idx + 1;
+      if ((node.limit || Model.PAGE) < need) node.limit = need;
+      node.expanded = true;
+      var ch = Model.ensureChildren(node, node.limit);
+      node = ch[idx];
+      if (!node) return -1;
+    }
+    rebuild();
+    revealedNode = node;
+    return View.indexOfNode(node);
+  }
+
+  function updateSearchCount() {
+    if (!searchCount) return;
+    var n = searchState.matches.length;
+    var cur = n ? (searchState.cur + 1) : 0;
+    searchCount.textContent = cur + ' / ' + n + (searchState.truncated ? '+' : '');
+    searchCount.classList.toggle('is-empty', !!searchState.term && n === 0);
+  }
+
+  // 当前搜索词对应的匹配器（key / value 共用）；正则写错时返回 null
+  function currentMatcher() {
+    return JP.makeMatcher(searchState.term, searchState.regex, !searchState.cs);
+  }
+
+  function runSearch() {
+    if (!searchInput) return;
+    var term = searchInput.value.trim();
+    searchState.term = term;
+    searchState.cur = -1;
+    searchState.matches = [];
+    searchState.truncated = false;
+    revealedNode = null;
+
+    var m = currentMatcher();
+    View.setSearch(m);
+
+    if (!m || !state.root) {
+      View.setCurrentRow(-1);
+      updateSearchCount();
+      if (m && term) JP.notify(t('fmt_first'));
+      if (!m && term) JP.notify(t('search_bad_re', term));
+      searchInput.classList.toggle('is-bad', !!term && !m);
+      return;
+    }
+    searchInput.classList.remove('is-bad');
+
+    var hits = [];
+    searchState.truncated = collectMatches(state.root.raw, m, hits);
+    searchState.matches = hits.map(function (it) { return { path: pathOf(it) }; });
+
+    if (searchState.matches.length) {
+      JP.notify(searchState.truncated
+        ? t('search_hits_more', JP.fmtNum(searchState.matches.length))
+        : t('search_hits', JP.fmtNum(searchState.matches.length)));
+      gotoMatch(0);
+    } else {
+      View.setCurrentRow(-1);
+      updateSearchCount();
+      JP.notify(t('search_none'));
+    }
+  }
+
+  // 数据变了（重新格式化 / 切层级）：保住搜索词重算命中，但不自动跳转
+  function refreshMatches() {
+    if (!searchState.open || !searchState.term) return;
+    var m = currentMatcher();
+    View.setSearch(m);
+    var hits = [];
+    if (m && state.root) {
+      searchState.truncated = collectMatches(state.root.raw, m, hits);
+      searchState.matches = hits.map(function (it) { return { path: pathOf(it) }; });
+    } else {
+      searchState.matches = [];
+      searchState.truncated = false;
+    }
+    searchState.cur = -1;
+    revealedNode = null;
+    View.setCurrentRow(-1);
+    updateSearchCount();
+  }
+
+  function gotoMatch(i) {
+    var ms = searchState.matches;
+    if (!ms.length) return;
+    if (i < 0) i = ms.length - 1;
+    if (i >= ms.length) i = 0;
+
+    var idx = revealPath(ms[i].path);
+    if (idx < 0) { refreshMatches(); return; }
+
+    searchState.cur = i;
+    View.setCurrentRow(idx);
+    View.scrollToIndex(idx);
+    updateSearchCount();
+  }
+
+  function bindSearch() {
+    if (!searchBox || !searchInput) return;
+
+    searchInput.addEventListener('input', function () {
+      syncSearchClear();
+      if (srchTimer) clearTimeout(srchTimer);
+      srchTimer = setTimeout(runSearch, 200);   // 大文件别每敲一个字就全量扫一遍
+    });
+
+    searchInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (searchState.matches.length) gotoMatch(searchState.cur + (e.shiftKey ? -1 : 1));
+        else runSearch();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeSearch();
+        jsonInput.focus();
+      }
+    });
   }
 
   /* ============================================================
@@ -909,15 +1544,29 @@
     else applyLevel(lv, false);
   }
 
+  /* 真正「全部展开」（不受每容器 500 项分页限制）会产出多少行：
+     每个叶子 1 行，每个容器 2 行（起始行 + 收口行）。 */
+  function fullExpandRows(st) {
+    if (!st) return 0;
+    var cont = 0;
+    var bdc = st.byDepthCont || [];
+    for (var i = 0; i < bdc.length; i++) cont += bdc[i] || 0;
+    return st.nodes + cont;
+  }
+
   function expandAll() {
     if (!state.root) { JP.notify(t('fmt_first')); return; }
-    var lv = levelForRows(state.stats, HARD_ROWS);
-    if (lv === FULL_EXPAND) {
-      applyLevel(FULL_EXPAND, false);
-    } else {
-      applyLevel(lv, true);
-      JP.notify(t('expand_limited', lv));
+
+    // 行数在预算内时才解除分页 —— 否则「全部」这个按钮名不符实：
+    // levelForRows 的估算本身就带着 500 页的假设（本例估算出来才 2007 行），
+    // 于是它永远会判定「够小、可以全展开」，但展开后每个容器仍被 500 卡住。
+    if (fullExpandRows(state.stats) <= HARD_ROWS) {
+      Model.unpaged = true;
+      try { applyLevel(FULL_EXPAND, false); } finally { Model.unpaged = false; }
+      return;
     }
+    applyLevel(FULL_EXPAND, true);
+    JP.notify(t('expand_paged', JP.fmtNum(Model.PAGE)));
   }
 
   function ensureFormatted() {
@@ -1064,6 +1713,22 @@
       JP.copyText(text)
         .then(function () { if (btn) flashBtn(btn, true); else JP.notify(t('copied_raw')); })
         .catch(function () { if (btn) flashBtn(btn, false); else JP.notify(t('copy_fail')); });
+    },
+    // ---- 结果区搜索（key + value，支持正则）----
+    search: function () { toggleSearch(); },
+    'search-prev': function () { gotoMatch(searchState.cur - 1); },
+    'search-next': function () { gotoMatch(searchState.cur + 1); },
+    'search-close': function () { closeSearch(); },
+    'search-clear': function () { clearSearchTerm(); },
+    'search-regex': function () {
+      searchState.regex = !searchState.regex;
+      syncSearchToggles();
+      runSearch();
+    },
+    'search-case': function () {
+      searchState.cs = !searchState.cs;
+      syncSearchToggles();
+      runSearch();
     },
     // ---- 工作区（左侧文件树）----
     'ws-toggle': function () { JPWS.toggleCollapsed(); }

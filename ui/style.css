@@ -404,22 +404,88 @@ body.resizing .resizer::after { background: var(--primary); }
 }
 .jv-canvas[hidden], .jv-plain[hidden] { display: none; }
 
-/* 行容器：整体 translateY 到当前窗口起点 */
+/* 行容器：整体 translateY 到当前窗口起点；左右贴齐画布，保证换行宽度与 JS 估算一致 */
 .jv-rows {
   position: absolute;
   top: var(--jv-pad-y);
   left: var(--jv-pad-x);
+  right: var(--jv-pad-x);
   will-change: transform;
 }
 
 .jv-row {
-  height: var(--row-h);
+  position: relative;          /* 行号绝对定位的参照 */
+  /* 高度不写死：大段文本值会软换行成多个视觉行，行高由实际内容撑开 */
+  min-height: var(--row-h);
   line-height: var(--row-h);
-  white-space: pre;
+  white-space: pre-wrap;       /* 换行后仍保留缩进与连续空格 */
+  overflow-wrap: anywhere;     /* 超长无空格串（base64 / URL）也要断，不能横向溢出 */
+  word-break: break-all;
   border-radius: 3px;
   padding-right: 8px;
 }
 .jv-row:hover { background: var(--hl-row-hover); }
+
+/* 行号：绝对定位在行首，不随层级缩进移动；不可选，复制时不带出数字 */
+.jv-ln {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--jv-ln-w, 42px);
+  text-align: right;
+  padding-right: 10px;
+  color: var(--hl-punct);
+  opacity: .5;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* 搜索命中高亮 / 当前命中行 */
+.jv-mark {
+  background: color-mix(in srgb, var(--primary) 34%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+.jv-row.is-cur {
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+/* ---------- 行 hover 浮动复制按钮 ----------
+   挂在 hover 的那一行里（left 由 JS 按行缩进算），带个淡入，行数再多也只有一个实例 */
+.row-copy {
+  position: absolute;
+  top: 3px;
+  width: 17px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--panel-bg) 90%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;                        /* 别把按钮里的东西混进选区 */
+  opacity: 0;
+  animation: row-copy-in .12s ease-out forwards;
+  transition: color .15s, border-color .15s, background .15s;
+  z-index: 2;
+}
+.row-copy:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 18%, var(--panel-bg));
+}
+@keyframes row-copy-in { to { opacity: 1; } }
+/* 命中了但值太长、没做逐段染色：底线标注，别让「计数说命中」在界面上没痕迹 */
+.jv-key.is-hit,
+.jv-val.is-hit {
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 2px;
+}
 
 .jv-fold { display: inline-block; width: 14px; text-align: center; color: var(--primary); user-select: none; }
 .jv-fold.clickable { cursor: pointer; }
@@ -453,6 +519,98 @@ body.resizing .resizer::after { background: var(--primary); }
 .json-view ::-moz-selection, .jv-row ::-moz-selection {
   color: var(--text);
 }
+
+/* ---------- 结果区浮动搜索框 ---------- */
+.search-box {
+  position: absolute;
+  top: 46px;                 /* 贴着 40px 高的标题栏下沿 */
+  right: 14px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
+}
+.search-box[hidden] { display: none; }
+
+.search-input {
+  width: 150px;
+  padding: 3px 21px 3px 7px;   /* 右侧给清空按钮留出位置 */
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--editor-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--primary); }
+.search-input.is-bad { border-color: #e5484d; }
+
+/* 清空按钮：叠在输入框右内侧，有输入内容才显示 */
+.search-field { position: relative; display: inline-flex; }
+.search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-soft);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all .15s;
+}
+.search-clear:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--primary) 20%, transparent);
+}
+.search-clear[hidden] { display: none; }
+
+/* 正则 / 大小写开关打开后的样式 */
+.search-btn.is-on {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  font-weight: 600;
+}
+.search-input::placeholder { color: var(--text-soft); opacity: .7; }
+
+.search-count {
+  min-width: 44px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.search-count.is-empty { color: #e5484d; }
+
+.search-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.search-btn:hover { border-color: var(--primary); color: var(--primary); }
 
 /* ---------- 深色主题：DBX 注入的非语义 --color-* 令牌在深背景下可能无效，
    统一覆盖为自管深色，保证整工具内容清晰可读 ---------- */
@@ -495,6 +653,14 @@ body.resizing .resizer::after { background: var(--primary); }
   color: #ff8a90;
 }
 :root[data-dbx-theme="dark"] .jv-plain.is-error { color: #ff8a90; }
+
+/* 深色下浮动搜索框：阴影减弱 + 输入框底色与面板区分开 */
+:root[data-dbx-theme="dark"] .search-box { box-shadow: 0 4px 14px rgba(0, 0, 0, .45); }
+:root[data-dbx-theme="dark"] .search-input { background: #23262f; }
+:root[data-dbx-theme="dark"] .search-count.is-empty { color: #ff8a90; }
+:root[data-dbx-theme="dark"] .jv-row.is-cur {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
 
 /* ---------- 右键上下文菜单 ---------- */
 .ctx-menu {

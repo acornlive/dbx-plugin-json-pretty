@@ -53,12 +53,38 @@
 
       <div class="pane" id="paneRight">
         <div class="pane-title">
-          <span data-i18n="result">结果</span>
+          <!-- 嵌套解析：值里如果有 JSON 文本（body / payload 常见），要不要递归当成 JSON 展开 -->
+          <label class="ws-switch" data-i18n-title="deep_parse_title" title="把值里的 JSON 文本（如 body）递归解析成可展开的树">
+            <input type="checkbox" id="deepParseToggle" />
+            <span class="ws-track"><span class="ws-knob"></span></span>
+            <span data-i18n="deep_parse">嵌套解析</span>
+          </label>
           <span class="pane-actions">
             <span class="level-label" data-i18n="expand_label">展开</span>
             <span id="levelButtons" class="level-buttons"></span>
+            <button class="mini-btn" data-action="search" data-i18n="search_toggle" data-i18n-title="search_toggle_title" title="在结果搜索 key（Ctrl+F）">搜索</button>
             <button class="mini-btn" data-action="copy" data-i18n="copy" data-i18n-title="copy_output_title" title="复制结果全部内容">复制</button>
           </span>
+        </div>
+        <!-- 浮动搜索框：浮在结果区内容之上，搜 key 与 value，命中自动展开并高亮 -->
+        <div id="searchBox" class="search-box" hidden>
+          <span class="search-field">
+            <input id="searchInput" class="search-input" type="text" spellcheck="false"
+                   data-i18n-ph="search_ph" data-i18n-title="search_input_title"
+                   placeholder="搜索 key 或值…" title="搜索 key 与值" />
+            <!-- 只有输入框里有内容才出现：一键清空搜索词，搜索框本身保持打开 -->
+            <button id="searchClear" class="search-clear" type="button" hidden
+                    data-action="search-clear" data-i18n-title="search_clear"
+                    title="清空搜索词" aria-label="清空搜索词">×</button>
+          </span>
+          <button class="search-btn" type="button" data-action="search-regex"
+                  data-i18n-title="search_regex_title" title="按正则搜索" aria-label="按正则搜索">.*</button>
+          <button class="search-btn" type="button" data-action="search-case"
+                  data-i18n-title="search_case_title" title="区分大小写" aria-label="区分大小写">Aa</button>
+          <span id="searchCount" class="search-count">0 / 0</span>
+          <button class="search-btn" type="button" data-action="search-prev" data-i18n-title="search_prev" title="上一个匹配" aria-label="上一个匹配">↑</button>
+          <button class="search-btn" type="button" data-action="search-next" data-i18n-title="search_next" title="下一个匹配" aria-label="下一个匹配">↓</button>
+          <button class="search-btn" type="button" data-action="search-close" data-i18n-title="search_close" title="关闭搜索" aria-label="关闭搜索">×</button>
         </div>
         <div id="jsonOutput" class="json-view">
           <div id="jvCanvas" class="jv-canvas" hidden><div id="jvRows" class="jv-rows"></div></div>

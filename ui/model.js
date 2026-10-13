@@ -11,7 +11,6 @@
   var JP = window.JP;
   var Model = JP.Model = {};
 
-  Model.MAX_CELL = 2000;       // 单个值显示的最大字符数（超出截断，双击复制仍是完整值）
   Model.PAGE = 500;            // 单个容器一次渲染的子节点上限
 
   var STATS_BUDGET = 300000;   // 统计遍历节点上限（超出则标记为截断）
@@ -70,7 +69,73 @@
 
   // 当前容器实际渲染多少个子节点
   Model.childLimit = function (node) {
+    if (Model.unpaged) return node.size;
     return Math.min(node.size, node.limit || Model.PAGE);
+  };
+
+  /* ============================================================
+     嵌套解析：把「值是 JSON 文本的字符串」递归变成真的对象 / 数组
+     典型场景：接口返回的 body / payload 是一坨转义过的 JSON 字符串，里面还套着一层。
+     关掉开关要能原样还原，所以每次替换都记下「所在容器 + 键 + 原字符串」。
+     ============================================================ */
+  Model.deepParse = false;   // 开关状态
+  Model.parseText = null;    // app.js 注入 losslessParse（保持无损大整数口径一致）
+  var deepReverts = [];
+  var DEEP_MAX = 12;         // 递归深度上限，防病态输入
+
+  // 只看「像 JSON 对象/数组」的字符串：把 "123" / "true" 这种标量也转了反而添乱
+  function tryNested(str) {
+    if (typeof str !== 'string') return str;
+    var len = str.length, i = 0;
+    while (i < len && (str.charCodeAt(i) === 32 || str.charCodeAt(i) === 10 ||
+                       str.charCodeAt(i) === 13 || str.charCodeAt(i) === 9)) i++;
+    if (i >= len) return str;
+    var c0 = str.charCodeAt(i);
+    if (c0 !== 123 && c0 !== 91) return str;              // 只认 { 或 [ 开头
+    var v;
+    try { v = Model.parseText ? Model.parseText(str) : JSON.parse(str); }
+    catch (e) { return str; }                             // 不是合法 JSON：原样留着当普通字符串
+    return (v !== null && typeof v === 'object') ? v : str;
+  }
+
+  // 原地替换（不复制对象图，大文件省一份内存和时间），返回顶层值
+  Model.deepResolve = function (root) {
+    deepReverts = [];
+    if (root === null || typeof root !== 'object') return root;
+    var stack = [{ v: root, d: 0 }];
+    while (stack.length) {
+      var it = stack.pop();
+      var v = it.v;
+      if (v === null || typeof v !== 'object' || it.d >= DEEP_MAX) continue;
+      var arr = Array.isArray(v);
+      var list = arr ? null : Object.keys(v);
+      var n = arr ? v.length : list.length;
+      for (var i = 0; i < n; i++) {
+        var key = arr ? i : list[i];
+        var e = v[key];
+        if (typeof e === 'string') {
+          var nv = tryNested(e);
+          if (nv !== e) {
+            v[key] = nv;
+            deepReverts.push({ c: v, k: key, s: e });
+            e = nv;
+          }
+        }
+        if (e !== null && typeof e === 'object') stack.push({ v: e, d: it.d + 1 });
+      }
+    }
+    return root;
+  };
+
+  // 还原成解析前的样子（同一份对象图上才能这么做）
+  Model.deepRevert = function () {
+    for (var i = deepReverts.length - 1; i >= 0; i--) {
+      var r = deepReverts[i];
+      r.c[r.k] = r.s;
+    }
+    var count = deepReverts.length;
+    deepReverts = [];
+    return count;
   };
 
   Model.serialize = function (node) {
@@ -79,6 +144,31 @@
       // 还原大整数标记
       return json.replace(/"JPBIG_(-?\d+)"/g, '$1');
     } catch (e) { return String(node.raw); }
+  };
+
+  /* 行 hover 复制按钮用的 payload：这一行所代表节点的「完整值」，pretty + 带 key 包裹。
+     entry.part 说明这行是节点的哪一部分：
+       leaf / open -> 有值可复制；close（} ]）和 more（「还有 N 项」）没有，返回空串（不显示按钮）
+     有 key 的行（"k": [、"k": "v"）包成 {"k": <完整值>}，这样单独粘贴出去也是合法 JSON；
+     根节点 / 数组元素没有 key，直接输出值本身。
+     注意 node.raw 是原始引用：折叠的和被分页截断的那部分一样在里面，复制永远是完整的整棵子树。 */
+  // 这一行值不值得给复制按钮（轻量判断，hover 时每次都跑，不 stringify）
+  Model.rowCopyable = function (entry) {
+    if (!entry || !entry.node) return false;
+    return entry.part !== 'close' && entry.part !== 'more';
+  };
+
+  Model.rowCopyText = function (entry) {
+    if (!Model.rowCopyable(entry)) return '';
+    var n = entry.node;
+    if (n.key === null || n.key === undefined) return Model.serialize(n);
+    try {
+      var holder = {};
+      holder[n.key] = n.raw;
+      return JSON.stringify(holder, null, 2).replace(/"JPBIG_(-?\d+)"/g, '$1');
+    } catch (e) {
+      return Model.serialize(n);   // key 不合法等极端情况，退回「只复制值」
+    }
   };
 
   /* ============================================================
@@ -141,7 +231,8 @@
 
   function leafChars(n) {
     var c = (n.key === null || n.key === undefined) ? 0 : (n.key.length + 4);
-    if (n.kind === 'string') c += Math.min(n.value.length, Model.MAX_CELL) + 2;
+    // 值现在整段渲染（超长由结果区自动换行），这里按完整长度估 Flatten 后的宽度
+    if (n.kind === 'string') c += n.value.length + 2;
     else if (n.kind === 'number') c += 20;
     else if (n.kind === 'boolean') c += 6;
     else c += 4;
